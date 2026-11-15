@@ -363,10 +363,10 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V4M7.5 8.5L12 4l4.5 4.5M5 19h14"></path></svg>
           Upload a shader
         </button>
-        <button class="btn" id="get-app" title="Download the Wallshaders installer for Windows 10 and 11">
+        <a class="btn" id="get-app" href="https://github.com/DorFinkelstein/wallshaders/releases/latest" target="_blank" rel="noopener" style="text-decoration:none" title="Opens the Wallshaders download page on GitHub (Windows 10 and 11)">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"></path></svg>
-          <span id="get-app-text">Download the app</span>
-        </button>
+          Download the app
+        </a>
       </div>
       <div class="grid-scroll">
         <div class="grid" id="grid"></div>
@@ -844,33 +844,6 @@
     } catch (e) {
       toast("Copying is blocked in this view. Use Download shader instead.", true);
     }
-  });
-
-  // ---- download the app itself (the installer, zipped, published beside this page) ----
-  $("get-app").addEventListener("click", function () {
-    var button = this;
-    var label = $("get-app-text");
-    if (!downloads) {
-      toast("Downloads aren't available in this view. Open this page in a browser on claude.ai.", true);
-      return;
-    }
-    button.disabled = true;
-    label.textContent = "Preparing…";
-    fetch("Wallshaders-setup.zip").then(function (res) {
-      if (!res.ok) throw { code: "missing" };
-      return res.blob();
-    }).then(function (blob) {
-      return downloads.save({ filename: "Wallshaders-setup.zip", data: blob });
-    }).then(function () {
-      toast("Saved. Unzip it and run the installer inside.");
-    }).catch(function (e) {
-      if (e && e.code === "declined") return;
-      if (e && e.code === "rate_limited") toast("A save prompt is already open.", true);
-      else toast("The app could not be downloaded here. Try again in a moment.", true);
-    }).finally(function () {
-      button.disabled = false;
-      label.textContent = "Download the app";
-    });
   });
 
   // ---- remove ----
