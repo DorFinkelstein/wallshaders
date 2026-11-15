@@ -1,4 +1,5 @@
-// Night Sky — stars that slowly come and go, with the occasional shooting star.
+// Night Sky — stars that are born, flicker and die, shimmer that sweeps across
+// the sky in waves, shooting stars that cross the whole screen, and the odd satellite.
 
 float hash11(float n) {
     return fract(sin(n * 127.1) * 43758.5453);
@@ -33,9 +34,10 @@ float fbm(vec2 p) {
 }
 
 // One grid of stars. `cells` is how many grid cells fit in the screen height,
-// `crowd` (0..1) says how dense this part of the sky is, and `maxGrow` is how
-// many extra pixels of radius the biggest stars in this grid can have.
-vec3 starLayer(vec2 p, float cells, float seed, float crowd, float maxGrow) {
+// `crowd` (0..1) says how dense this part of the sky is, `maxGrow` is how many
+// extra pixels of radius the biggest stars get, and `air` is the local
+// shimmer of the atmosphere (around 1.0).
+vec3 starLayer(vec2 p, float cells, float seed, float crowd, float maxGrow, float air) {
     vec2 g = p * cells;
     vec2 cell = floor(g) + seed;
     vec2 f = fract(g) - 0.5;
@@ -50,50 +52,223 @@ vec3 starLayer(vec2 p, float cells, float seed, float crowd, float maxGrow) {
     float pick = hash21(id);
     if (pick > 0.12 + crowd * 0.44) return vec3(0.0);
 
-    // Most stars are pinpricks; some are clearly bigger.
     float big = pow(hash21(id + 11.3), 5.0);
     vec2 offset = vec2(hash21(id + 3.1), hash21(id + 7.7)) - 0.5;
-    float d = length(f - offset * mix(0.7, 0.2, big));
+    vec2 placed = offset * mix(0.6, 0.2, big);
+    vec2 v = f - placed;
+    float d = length(v);
+    // Each star is drawn inside its own grid cell. Fade its light to nothing
+    // before the nearest cell wall, otherwise a bright star's glow gets cut
+    // off there and shows up as a square.
+    float room = 0.5 - max(abs(placed.x), abs(placed.y));
+    float inside = 1.0 - smoothstep(room * 0.4, room, d);
 
-    float pixel = cells / iResolution.y;
-    float radius = (1.25 + big * (maxGrow - 0.35)) * pixel;
-    float core = smoothstep(radius, 0.0, d);
-    float halo = (0.08 + big * 0.6) * smoothstep(radius * 2.5, 0.0, d);
+    // --- life: a star swells into view with a brief flare, settles, and at the
+    // end shrinks to a dull ember before it goes out.
+    float appear = smoothstep(0.0, 0.10, x);
+    float flare = exp(-pow((x - 0.10) / 0.035, 2.0));
+    float fading = smoothstep(0.74, 1.0, x);
+    float life = appear * (1.0 - fading);
+    float sizeNow = mix(0.45, 1.0, appear) * (1.0 + 0.35 * flare) * mix(1.0, 0.55, fading);
 
-    // Fade in, stay a while, fade out completely.
-    float life = smoothstep(0.0, 0.2, x) * (1.0 - smoothstep(0.72, 1.0, x));
-    // Twinkle while alive.
-    float twinkle = 0.72 + 0.28 * sin(iTime * (0.3 + pick * 2.4) + pick * 60.0);
-    life *= twinkle;
+    // --- flicker: two slow rhythms that never line up, scaled by the air above it.
+    float w = 0.3 + pick * 2.4;
+    float phase = pick * 60.0;
+    float flicker = 0.62 + 0.24 * sin(iTime * w + phase) + 0.14 * sin(iTime * w * 2.3 + phase * 1.7);
+    flicker *= air;
 
+    // --- colour: warm or cool, drifting a little as it flickers, reddening as it dies.
     float tone = hash21(id + 31.8);
     vec3 tint = mix(vec3(1.0, 0.86, 0.72), vec3(0.74, 0.84, 1.0), tone);
     tint = mix(vec3(1.0), tint, 0.55);
+    float shift = 0.07 * sin(iTime * w * 1.7 + phase);
+    tint += vec3(shift, 0.0, -shift);
+    tint = mix(tint, vec3(1.0, 0.62, 0.42), fading * 0.6);
+
+    // --- shape: a hard bright core, a soft glow around it, and on the larger
+    // stars four thin rays like the ones a lens makes.
+    float pixel = cells / iResolution.y;
+    float radius = (1.25 + big * (maxGrow - 0.35)) * pixel * sizeNow;
+    float core = exp(-(d * d) / (radius * radius * 0.45));
+    float glow = (0.07 + big * 0.55) * exp(-d / (radius * 1.2));
+
+    vec2 r = vec2(v.x * 0.94 - v.y * 0.34, v.x * 0.34 + v.y * 0.94);
+    float rayLength = radius * (2.4 + 1.2 * flicker);
+    float rays = exp(-abs(r.y) / (radius * 0.16)) * exp(-abs(r.x) / rayLength)
+               + exp(-abs(r.x) / (radius * 0.16)) * exp(-abs(r.y) / rayLength);
+    rays *= smoothstep(0.12, 0.5, big) * 0.45;
 
     float brightness = mix(0.45, 1.6, hash21(id + 37.2)) + big * 1.6;
-    return tint * (core + halo) * life * brightness;
+    brightness *= 1.0 + 0.9 * flare;
+
+    vec3 col = tint * (glow + rays) + mix(tint, vec3(1.0), 0.6) * core;
+    return col * inside * life * flicker * brightness;
 }
 
-// One shooting star per time slot, and only in some of the slots.
+// Where star number `i` of a formation sits, in a square from -0.5 to 0.5.
+// Returns (x, y, 1) for a star, or z = 0 when the shape has no star `i`.
+vec3 formationStar(int shape, int i) {
+    float n = float(i);
+    vec2 pt = vec2(0.0);
+    int count = 7;
+
+    if (shape == 0) {
+        // Wave: a row that snakes gently.
+        float t = n / 6.0 - 0.5;
+        pt = vec2(t * 0.95, 0.09 * sin(t * 6.2832));
+    } else if (shape == 1) {
+        // Arc: a wide shallow bow.
+        float t = n / 6.0 - 0.5;
+        pt = vec2(t * 0.95, 1.5 * t * t - 0.2);
+    } else if (shape == 2) {
+        // Zigzag: a W-shaped run.
+        float t = n / 6.0 - 0.5;
+        pt = vec2(t * 0.95, (fract(n * 0.5) * 2.0 - 0.5) * 0.34);
+    } else if (shape == 3) {
+        // Ring.
+        count = 8;
+        float a = n * 0.7854;
+        pt = 0.40 * vec2(cos(a), sin(a));
+    } else if (shape == 4) {
+        // Spiral unwinding from the middle.
+        count = 9;
+        float a = n * 0.95;
+        pt = (0.07 + 0.046 * n) * vec2(cos(a), sin(a));
+    } else if (shape == 5) {
+        // Triangle: three corners with a star halfway along each side.
+        count = 6;
+        float c0 = floor(n * 0.5);
+        float a0 = 1.5708 + c0 * 2.0944;
+        float a1 = a0 + 2.0944;
+        vec2 p0 = 0.44 * vec2(cos(a0), sin(a0));
+        vec2 p1 = 0.44 * vec2(cos(a1), sin(a1));
+        pt = mix(p0, p1, fract(n * 0.5));
+    } else if (shape == 6) {
+        // Kite with a trailing tail.
+        const vec2[7] kite = vec2[7](
+            vec2(0.0, 0.42), vec2(0.22, 0.14), vec2(0.0, -0.10), vec2(-0.22, 0.14),
+            vec2(0.04, -0.24), vec2(-0.03, -0.36), vec2(0.05, -0.47));
+        pt = kite[min(i, 6)];
+    } else if (shape == 7) {
+        // Cross: a long upright with two arms.
+        if (i < 5) pt = vec2(0.0, -0.46 + 0.23 * n);
+        else pt = vec2(i == 5 ? -0.26 : 0.26, 0.20);
+    } else if (shape == 8) {
+        // Ladle: a four-star bowl and a bent handle.
+        const vec2[7] ladle = vec2[7](
+            vec2(0.02, -0.20), vec2(0.30, -0.22), vec2(0.34, 0.02), vec2(0.04, 0.04),
+            vec2(-0.16, 0.14), vec2(-0.32, 0.26), vec2(-0.47, 0.20));
+        pt = ladle[min(i, 6)];
+    } else if (shape == 9) {
+        // Crown: a half circle whose stars alternate high and low.
+        float a = 3.1416 * n / 6.0;
+        float r = fract(n * 0.5) > 0.25 ? 0.44 : 0.30;
+        pt = vec2(r * cos(a), r * sin(a) - 0.2);
+    } else if (shape == 10) {
+        // Five-pointed star: tips and the notches between them.
+        count = 10;
+        float a = 1.5708 + n * 0.6283;
+        float r = fract(n * 0.5) > 0.25 ? 0.19 : 0.45;
+        pt = r * vec2(cos(a), sin(a));
+    } else if (shape == 11) {
+        // Twin trails: two curved rows side by side.
+        count = 8;
+        float t = floor(n * 0.5) / 3.0 - 0.5;
+        float lane = fract(n * 0.5) > 0.25 ? 0.11 : -0.11;
+        pt = vec2(t * 0.9, lane + 0.5 * t * t - 0.05);
+    } else if (shape == 12) {
+        // Figure eight.
+        count = 8;
+        float a = n * 0.7854 + 0.3927;
+        pt = vec2(0.45 * cos(a), 0.24 * sin(2.0 * a));
+    } else {
+        // Arrow: a shaft with a three-star head.
+        count = 8;
+        if (i < 5) pt = vec2(-0.45 + 0.16 * n, 0.0);
+        else if (i == 5) pt = vec2(0.46, 0.0);
+        else pt = vec2(0.26, i == 6 ? 0.17 : -0.17);
+    }
+
+    return vec3(pt, i < count ? 1.0 : 0.0);
+}
+
+// Now and then a group of stars lights up in a shape (a ring, a spiral, a
+// crown, an arrow and so on), stays for a minute or two, and goes out again.
+// No lines are drawn between them.
+vec3 formation(vec2 p, float cells, float seed) {
+    vec2 g = p * cells;
+    vec2 cell = floor(g) + seed;
+    vec2 f = fract(g);
+
+    float period = mix(70.0, 130.0, hash21(cell + 2.9));
+    float clock = iTime / period + hash21(cell + 6.1);
+    float x = fract(clock);
+    vec2 id = cell + floor(clock) * vec2(5.3, 9.1);
+    if (hash21(id) > 0.4) return vec3(0.0);
+
+    int shape = int(hash21(id + 1.7) * 14.0);
+    float angle = hash21(id + 4.4) * 6.2832;
+    float span = mix(0.4, 0.6, hash21(id + 8.8));
+    vec2 center = 0.5 + (vec2(hash21(id + 12.1), hash21(id + 15.5)) - 0.5) * 0.2;
+    float ca = cos(angle);
+    float sa = sin(angle);
+    // One star in each formation is its anchor: larger and brighter than the rest.
+    float anchor = floor(hash21(id + 17.3) * 5.0);
+
+    float pixel = cells / iResolution.y;
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < 10; i++) {
+        float n = float(i);
+        vec3 spot = formationStar(shape, i);
+        if (spot.z < 0.5) continue;
+
+        // Slightly off, so it never looks ruler-drawn.
+        vec2 pt = spot.xy + (vec2(hash21(id + n * 3.3), hash21(id + n * 5.9)) - 0.5) * 0.04;
+        pt = vec2(pt.x * ca - pt.y * sa, pt.x * sa + pt.y * ca) * span + center;
+        float d = length(f - pt);
+
+        // The stars light up one after another along the shape, and at the
+        // end go out in the same order.
+        float lit = smoothstep(n * 0.018, n * 0.018 + 0.08, x)
+                  * (1.0 - smoothstep(0.72 + n * 0.018, 0.80 + n * 0.018, x));
+        float flicker = 0.82 + 0.18 * sin(iTime * (0.5 + n * 0.23) + n * 2.0 + id.x);
+
+        float isAnchor = 1.0 - step(0.5, abs(n - anchor));
+        float radius = (1.7 + 1.1 * isAnchor + 0.5 * hash21(id + n * 8.1)) * pixel;
+        float core = exp(-(d * d) / (radius * radius * 0.45));
+        float glow = (0.30 + 0.25 * isAnchor) * exp(-d / (radius * 1.5));
+
+        vec3 tint = mix(vec3(0.86, 0.91, 1.0), vec3(1.0, 0.90, 0.78), hash21(id + n * 4.7));
+        sum += (mix(tint, vec3(1.0), 0.5) * core + tint * glow) * lit * flicker * (1.0 + 0.5 * isAnchor);
+    }
+
+    return sum * 2.0;
+}
+
+// A shooting star. It enters past one edge of the screen and leaves past
+// another, so it is never seen starting or stopping.
 vec3 shootingStar(vec2 p, float aspect, float slotLength, float seed) {
     float slot = floor(iTime / slotLength) + seed;
     if (hash11(slot) < 0.5) return vec3(0.0);
 
-    float duration = mix(0.9, 1.6, hash11(slot + 5.0));
+    float duration = mix(1.5, 2.6, hash11(slot + 5.0));
     float begin = hash11(slot + 1.0) * (slotLength - duration);
     float k = (mod(iTime, slotLength) - begin) / duration;
     if (k < 0.0 || k > 1.0) return vec3(0.0);
 
     float side = hash11(slot + 2.0) < 0.5 ? -1.0 : 1.0;
-    float angle = mix(0.2, 0.85, hash11(slot + 3.0));
+    float angle = mix(0.15, 0.9, hash11(slot + 3.0));
     vec2 dir = vec2(cos(angle) * side, -sin(angle));
 
-    vec2 start = vec2(mix(0.15, 0.85, hash11(slot + 4.0)) * aspect, mix(0.55, 1.0, hash11(slot + 6.0)));
     // Some are small and quick, some are noticeably heavier.
     float size = mix(1.0, 1.8, hash11(slot + 8.0));
-    float travel = mix(0.5, 0.85, hash11(slot + 7.0));
-    vec2 head = start + dir * travel * k;
-    float tailLength = (0.38 * sin(3.14159 * k) + 0.03) * size;
+    float tailLength = mix(0.30, 0.42, hash11(slot + 9.0)) * size;
+
+    // The path runs through a point somewhere in the middle of the screen and
+    // extends far enough both ways that head and tail are off-screen at the ends.
+    vec2 through = vec2(mix(0.25, 0.75, hash11(slot + 4.0)) * aspect, mix(0.35, 0.8, hash11(slot + 6.0)));
+    float reach = 0.5 * length(vec2(aspect, 1.0)) + 0.5 * tailLength + 0.3;
+    vec2 head = through + dir * (reach + 0.5 * tailLength) * (2.0 * k - 1.0);
 
     // Distance from this pixel to the streak, and how far along the tail it is.
     vec2 rel = p - head;
@@ -112,8 +287,9 @@ vec3 shootingStar(vec2 p, float aspect, float slotLength, float seed) {
     float wakeWidth = width * 4.0;
     float wake = exp(-(d * d) / (wakeWidth * wakeWidth)) * (1.0 - along) * 0.18;
 
-    // Round glow at the head, plus a thin flare across the direction of travel.
-    float headGlow = exp(-length(rel) * px * 0.11 / size) * 1.2;
+    // Round glow at the head that sputters as it burns, plus a thin flare across it.
+    float sputter = 0.85 + 0.15 * sin(iTime * 47.0 + slot);
+    float headGlow = exp(-length(rel) * px * 0.11 / size) * 1.2 * sputter;
     vec2 across = vec2(-dir.y, dir.x);
     float flare = exp(-abs(dot(rel, dir)) * px * 0.6) * exp(-abs(dot(rel, across)) * px * 0.07 / size) * 0.5;
 
@@ -121,83 +297,73 @@ vec3 shootingStar(vec2 p, float aspect, float slotLength, float seed) {
     vec3 hot = vec3(0.93, 0.96, 1.0);
     vec3 ember = vec3(1.0, 0.72, 0.45);
     vec3 tint = mix(hot, ember, smoothstep(0.1, 0.9, along));
-    float fade = sin(3.14159 * k);
 
-    return (tint * (core + wake) + hot * (headGlow + flare)) * fade;
+    return tint * (core + wake) + hot * (headGlow + flare);
 }
 
-// Now and then a handful of stars lines up into a simple shape (a row, an arc
-// or a zigzag), stays for a minute or two, and fades away again. No lines are
-// drawn, so it only reads as a pattern if you happen to be looking.
-vec3 formation(vec2 p, float cells, float seed) {
-    vec2 g = p * cells;
-    vec2 cell = floor(g) + seed;
-    vec2 f = fract(g);
+// A satellite: one small steady point that takes half a minute to cross,
+// glinting slowly as it tumbles.
+vec3 satellite(vec2 p, float aspect) {
+    float slotLength = 67.0;
+    float slot = floor(iTime / slotLength);
+    if (hash11(slot + 70.0) < 0.35) return vec3(0.0);
 
-    float period = mix(70.0, 130.0, hash21(cell + 2.9));
-    float clock = iTime / period + hash21(cell + 6.1);
-    float x = fract(clock);
-    vec2 id = cell + floor(clock) * vec2(5.3, 9.1);
-    if (hash21(id) > 0.4) return vec3(0.0);
+    float duration = mix(24.0, 34.0, hash11(slot + 71.0));
+    float begin = hash11(slot + 72.0) * (slotLength - duration);
+    float k = (mod(iTime, slotLength) - begin) / duration;
+    if (k < 0.0 || k > 1.0) return vec3(0.0);
 
-    float shape = hash21(id + 1.7);
-    float angle = hash21(id + 4.4) * 6.2832;
-    float span = mix(0.3, 0.5, hash21(id + 8.8));
-    vec2 center = 0.5 + (vec2(hash21(id + 12.1), hash21(id + 15.5)) - 0.5) * 0.2;
-    float ca = cos(angle);
-    float sa = sin(angle);
+    float angle = hash11(slot + 73.0) * 6.2832;
+    vec2 dir = vec2(cos(angle), sin(angle));
+    vec2 through = vec2(mix(0.3, 0.7, hash11(slot + 74.0)) * aspect, mix(0.4, 0.8, hash11(slot + 75.0)));
+    float reach = 0.5 * length(vec2(aspect, 1.0)) + 0.1;
+    vec2 pos = through + dir * reach * (2.0 * k - 1.0);
 
-    float pixel = cells / iResolution.y;
-    float radius = 1.5 * pixel;
-    float sum = 0.0;
-    for (int i = 0; i < 5; i++) {
-        float n = float(i);
-        float t = n / 4.0 - 0.5;
-        vec2 pt = vec2(t, 0.0);
-        if (shape > 0.66) {
-            pt.y = (fract(n * 0.5) * 2.0 - 0.5) * 0.36;   // zigzag
-        } else if (shape > 0.33) {
-            pt.y = 1.6 * t * t - 0.2;                     // arc
-        }
-        // Slightly off, so it never looks ruler-drawn.
-        pt += (vec2(hash21(id + n * 3.3), hash21(id + n * 5.9)) - 0.5) * 0.08;
-        pt = vec2(pt.x * ca - pt.y * sa, pt.x * sa + pt.y * ca) * span + center;
-        float d = length(f - pt);
-        sum += smoothstep(radius, 0.0, d) + 0.3 * smoothstep(radius * 2.5, 0.0, d);
-    }
-
-    float life = smoothstep(0.0, 0.25, x) * (1.0 - smoothstep(0.7, 1.0, x));
-    return vec3(0.90, 0.93, 1.0) * sum * life * 0.9;
+    float d = length(p - pos);
+    float width = 1.3 / iResolution.y;
+    float glint = 0.32 + 0.22 * sin(iTime * 1.7 + slot) + 0.25 * pow(max(sin(iTime * 0.45 + slot), 0.0), 12.0);
+    return vec3(0.92, 0.91, 0.85) * exp(-(d * d) / (width * width)) * glint;
 }
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float aspect = iResolution.x / iResolution.y;
-    vec2 screen = fragCoord / iResolution.y;
-    // The whole sky drifts slowly, the way it does over a real night.
-    vec2 p = screen + vec2(iTime * 0.0025, iTime * 0.0009);
+    vec2 p = fragCoord / iResolution.y;
     float height = fragCoord.y / iResolution.y;
+    float t = iTime;
 
-    // Sky: nearly black overhead, a little lighter and bluer toward the horizon.
-    vec3 col = mix(vec3(0.030, 0.042, 0.085), vec3(0.004, 0.006, 0.016), smoothstep(0.0, 0.9, height));
+    // Sky: nearly black overhead, a little lighter and bluer toward the horizon,
+    // with the horizon glow breathing very slowly.
+    float breath = 0.88 + 0.12 * sin(t * 0.09);
+    vec3 col = mix(vec3(0.030, 0.042, 0.085) * breath, vec3(0.004, 0.006, 0.016), smoothstep(0.0, 0.9, height));
 
-    // A faint uneven band across the sky, so the stars are not spread evenly.
+    // A faint uneven band across the sky. It stays where it is but slowly
+    // changes shape, like thin haze.
     vec2 q = vec2(p.x * 0.8 + p.y * 0.55, p.y * 1.3 - p.x * 0.45);
-    float cloud = fbm(q * 1.6 + 4.0);
+    vec2 morph = 0.22 * vec2(sin(t * 0.045), cos(t * 0.037));
+    float cloud = fbm(q * 1.6 + 4.0 + morph);
     float band = smoothstep(0.38, 0.75, cloud);
     col += vec3(0.020, 0.022, 0.040) * band;
-    col += vec3(0.018, 0.010, 0.022) * smoothstep(0.5, 0.9, fbm(q * 3.1 - 2.0)) * band;
+    col += vec3(0.018, 0.010, 0.022) * smoothstep(0.5, 0.9, fbm(q * 3.1 - 2.0 - morph * 1.4)) * band;
+
+    // Shimmer of the air: two soft patterns sliding across each other in
+    // different directions. Nothing moves with them; stars under a bright
+    // patch simply flare up and stars under a dark one dim, so slow waves of
+    // sparkle roll across the sky.
+    float airA = noise(p * 2.0 + vec2(t * 0.13, t * 0.05));
+    float airB = noise(p * 3.1 - vec2(t * 0.09, -t * 0.11));
+    float air = 0.4 + 2.6 * airA * airB;
 
     float crowd = clamp(cloud * 1.1 - 0.1, 0.0, 1.0);
-    vec3 stars = starLayer(p, 26.0, 0.0, crowd, 4.5);
-    stars += starLayer(p + 3.7, 55.0, 41.0, crowd, 1.8) * 0.8;
-    stars += starLayer(p + 9.2, 110.0, 97.0, crowd, 0.6) * 0.55;
-    stars += formation(p + 5.5, 3.0, 13.0);
+    vec3 stars = starLayer(p, 26.0, 0.0, crowd, 4.5, air);
+    stars += starLayer(p + 3.7, 55.0, 41.0, crowd, 1.8, air) * 0.8;
+    stars += starLayer(p + 9.2, 110.0, 97.0, crowd, 0.6, air) * 0.55;
+    stars += formation(p + 5.5, 3.0, 13.0) * mix(0.8, 1.1, air * 0.5);
     // Stars low in the sky are dimmed by the haze.
     col += stars * mix(0.45, 1.0, smoothstep(0.0, 0.45, height));
 
-    // Shooting stars use fixed screen coordinates, so the drift does not carry them.
-    col += shootingStar(screen, aspect, 53.0, 0.0);
-    col += shootingStar(screen, aspect, 89.0, 500.0);
+    col += satellite(p, aspect);
+    col += shootingStar(p, aspect, 53.0, 0.0);
+    col += shootingStar(p, aspect, 89.0, 500.0);
 
     // A touch of grain to hide banding in the dark gradient.
     col += (hash21(fragCoord + fract(iTime) * 31.0) - 0.5) / 255.0;
