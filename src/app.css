@@ -1,0 +1,120 @@
+:root {
+  /* Warm grays */
+  --bg-0: #211f1e;
+  --bg-1: #2b2928;
+  --bg-2: #33302f;
+  --bg-3: #3f3b39;
+  --line: #48433f;
+  --text: #ebe5df;
+  --text-dim: #a89f98;
+  --text-faint: #7d756f;
+
+  /* Light terracotta */
+  --accent: #d98e73;
+  --accent-bright: #e8a78e;
+  --accent-deep: #b9694f;
+  --accent-wash: rgba(217, 142, 115, 0.14);
+  --on-accent: #2a1c16;
+
+  --good: #a3bd9c;
+  --bad: #e58a78;
+
+  --radius: 10px;
+  --radius-small: 6px;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-code: "Cascadia Code", "Cascadia Mono", Consolas, "Courier New", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg-1);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.45;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+input {
+  font: inherit;
+  color: inherit;
+}
+
+::selection {
+  background: rgba(217, 142, 115, 0.35);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--bg-3);
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--line);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 8px;
+  background: var(--bg-3);
+  color: var(--text);
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s;
+}
+.btn:hover {
+  background: var(--line);
+}
+.btn.primary {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+.btn.primary:hover {
+  background: var(--accent-bright);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

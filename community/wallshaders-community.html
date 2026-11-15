@@ -1,0 +1,1124 @@
+<title>Wallshaders Community</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+  /* Layout: the Wallshaders app window. Tool strip on the left, the gallery
+     where the script editor sits, and the preview pane on the right. */
+  :root {
+    color-scheme: dark;
+    --bg-0: #211f1e;
+    --bg-1: #2b2928;
+    --bg-2: #33302f;
+    --bg-3: #3f3b39;
+    --line: #48433f;
+    --text: #ebe5df;
+    --text-dim: #a89f98;
+    --text-faint: #7d756f;
+    --accent: #d98e73;
+    --accent-bright: #e8a78e;
+    --accent-wash: rgba(217, 142, 115, 0.14);
+    --on-accent: #2a1c16;
+    --good: #a3bd9c;
+    --bad: #e58a78;
+    --bad-wash: rgba(229, 138, 120, 0.1);
+    --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    --radius: 10px;
+    --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --font-code: "Cascadia Code", "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body {
+    background: #171615;
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-size: 13.5px;
+    line-height: 1.45;
+    padding-block: 14px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  button, input, textarea { font: inherit; color: inherit; }
+  button { background: none; border: none; padding: 0; cursor: pointer; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, .card:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  ::selection { background: rgba(217, 142, 115, 0.35); }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 10px; border: 2px solid transparent; background-clip: content-box; }
+
+  .shell {
+    display: flex;
+    height: 100%;
+    min-height: 0;
+    border-radius: 14px;
+    overflow: hidden;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+  }
+
+  /* ---- tool strip ---- */
+  .toolbar {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    width: 56px;
+    flex: none;
+    padding: 12px 0;
+    background: var(--bg-0);
+  }
+  .logo { display: grid; place-items: center; margin-bottom: 10px; }
+  .tool {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    transition: background 0.12s, color 0.12s;
+  }
+  .tool:hover { background: var(--bg-2); color: var(--text); }
+  .tool.on { background: var(--accent-wash); color: var(--accent-bright); }
+  .tool.on::before {
+    content: "";
+    position: absolute;
+    left: -8px; top: 10px; bottom: 10px;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: var(--accent);
+  }
+
+  .workspace { display: flex; flex: 1; min-width: 0; min-height: 0; }
+
+  /* ---- gallery ---- */
+  .gallery {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    background: var(--bg-2);
+  }
+  .gallery-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 14px;
+    padding: 14px 18px 12px;
+    flex: none;
+  }
+  .gallery-head h1 { margin: 0; font-size: 17px; font-weight: 600; text-wrap: balance; }
+  .count { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+  .live-dot {
+    display: inline-block;
+    width: 7px; height: 7px;
+    margin-right: 6px;
+    border-radius: 50%;
+    background: var(--text-faint);
+    vertical-align: 1px;
+  }
+  .live-dot.on { background: var(--good); box-shadow: 0 0 0 3px rgba(163, 189, 156, 0.18); }
+  .grow { flex: 1; }
+  .search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 32px;
+    width: 170px;
+    max-width: 100%;
+    padding: 0 10px;
+    border-radius: 8px;
+    background: var(--bg-0);
+    color: var(--text-faint);
+  }
+  .search input { flex: 1; min-width: 0; background: none; border: none; outline: none; color: var(--text); }
+  .search input::placeholder { color: var(--text-faint); }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    height: 32px;
+    padding: 0 14px;
+    border-radius: 8px;
+    background: var(--bg-3);
+    color: var(--text);
+    white-space: nowrap;
+    transition: background 0.12s;
+  }
+  .btn:hover { background: var(--line); }
+  .btn.primary { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+  .btn.primary:hover { background: var(--accent-bright); }
+  .btn.big { height: 38px; padding: 0 20px; }
+  .btn.danger:hover { color: var(--bad); }
+  .btn:disabled { opacity: 0.5; cursor: default; }
+
+  .grid-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 12px 18px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 6px;
+  }
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
+    border-radius: 12px;
+    text-align: left;
+    min-width: 0;
+  }
+  .card:hover { background: var(--bg-3); }
+  .card.on { background: var(--accent-wash); }
+  .thumb {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    width: 100%;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-0);
+  }
+  .card.on .thumb { box-shadow: 0 0 0 2px var(--accent); }
+  .thumb canvas { display: block; width: 100%; height: 100%; }
+  .badge {
+    position: absolute;
+    top: 6px; left: 6px;
+    padding: 1px 8px;
+    border-radius: 20px;
+    background: var(--accent);
+    color: var(--on-accent);
+    font-size: 10.5px;
+    font-weight: 600;
+  }
+  .card-text { display: flex; flex-direction: column; min-width: 0; padding: 0 2px 2px; }
+  .card-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card.on .card-name { color: var(--accent-bright); }
+  .card-author { color: var(--text-dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .empty { padding: 40px 20px; text-align: center; color: var(--text-dim); }
+  .empty strong { display: block; color: var(--text); font-size: 15px; margin-bottom: 4px; }
+
+  /* ---- preview pane ---- */
+  .detail {
+    display: flex;
+    flex-direction: column;
+    width: 44%;
+    min-width: 340px;
+    max-width: 640px;
+    flex: none;
+    min-height: 0;
+    overflow-y: auto;
+    background: var(--bg-1);
+  }
+  .pane-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 40px;
+    padding: 0 10px 0 18px;
+    flex: none;
+  }
+  .label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); }
+  .pane-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stat { font-family: var(--font-code); font-size: 11.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .icon-btn { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; color: var(--text-dim); flex: none; }
+  .icon-btn:hover { background: var(--bg-3); color: var(--text); }
+  .frame { padding: 6px 18px 0; flex: none; }
+  .stage {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    width: 100%;
+    max-width: 100%;
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--bg-0);
+    box-shadow: var(--shadow);
+  }
+  .stage canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+  .stage-msg {
+    position: absolute; inset: 0;
+    display: grid; place-items: center;
+    margin: 0; padding: 24px;
+    text-align: center;
+    color: var(--text-dim);
+    background: var(--bg-0);
+  }
+
+  .info { display: flex; flex-direction: column; gap: 14px; padding: 20px 18px 22px; }
+  .info h2 { margin: 0; font-size: 22px; font-weight: 600; line-height: 1.2; overflow-wrap: anywhere; text-wrap: balance; }
+  .byline { display: flex; align-items: center; gap: 8px; color: var(--text-dim); margin-top: -8px; }
+  .byline b { color: var(--accent-bright); font-weight: 600; }
+  .official {
+    padding: 0 7px;
+    border-radius: 20px;
+    border: 1px solid var(--line);
+    font-size: 10.5px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .description { margin: 0; max-width: 62ch; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .description.none { color: var(--text-faint); }
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .hint { margin: 0; max-width: 62ch; color: var(--text-faint); font-size: 12.5px; }
+  .confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--text-dim); }
+
+  /* ---- upload form ---- */
+  .upload { display: flex; flex-direction: column; gap: 14px; padding: 20px 18px 22px; }
+  .upload h2 { margin: 0; font-size: 18px; font-weight: 600; }
+  .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .field > span { color: var(--text-dim); font-size: 12.5px; }
+  .field input[type="text"], .field textarea {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--bg-0);
+    outline: none;
+  }
+  .field input[type="text"]:focus, .field textarea:focus { border-color: var(--accent); }
+  .field textarea { resize: vertical; min-height: 64px; }
+  #up-code { min-height: 190px; font-family: var(--font-code); font-size: 12.5px; line-height: 1.5; white-space: pre; overflow: auto; tab-size: 4; }
+  .file-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--text-faint); font-size: 12.5px; }
+  .file-row input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  .problems {
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    background: var(--bad-wash);
+    border: 1px solid rgba(229, 138, 120, 0.3);
+  }
+  .problems-title { color: var(--bad); font-weight: 600; }
+  .problems ul { list-style: none; margin: 6px 0 0; padding: 0; font-family: var(--font-code); font-size: 12px; }
+  .problems li { padding: 2px 0; overflow-wrap: anywhere; }
+  .problems .ln { color: var(--bad); margin-right: 10px; }
+  .notice { margin: 0; padding: 12px 14px; border-radius: var(--radius); background: var(--bg-2); color: var(--text-dim); max-width: 62ch; }
+
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+    transform: translateX(-50%);
+    z-index: 20;
+    max-width: min(520px, 84vw);
+    padding: 9px 16px;
+    border-radius: 20px;
+    background: var(--bg-0);
+    border: 1px solid var(--line);
+    box-shadow: var(--shadow);
+  }
+  .toast.bad { border-color: rgba(229, 138, 120, 0.5); color: #f3c0b5; }
+
+  /* ---- narrow screens: one column, preview first ---- */
+  @media (max-width: 860px) {
+    html, body { height: auto; }
+    .shell { flex-direction: column; height: auto; }
+    .toolbar { flex-direction: row; width: auto; padding: 8px 12px; }
+    .logo { margin: 0 8px 0 0; }
+    .tool.on::before { left: 10px; right: 10px; top: auto; bottom: -8px; width: auto; height: 3px; border-radius: 3px 3px 0 0; }
+    .workspace { flex-direction: column; }
+    .detail { order: -1; width: auto; min-width: 0; max-width: none; overflow: visible; }
+    .gallery { min-height: 0; }
+    .grid-scroll { overflow: visible; }
+    .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+    .search { width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+
+<div class="shell">
+  <nav class="toolbar" aria-label="Sections">
+    <div class="logo" title="Wallshaders">
+      <svg viewBox="0 0 32 32" width="30" height="30" aria-hidden="true">
+        <rect width="32" height="32" rx="9" fill="#d98e73"></rect>
+        <circle cx="20.5" cy="11.5" r="4.5" fill="#fff0de"></circle>
+        <path d="M0 18c6-3 11-2 17 1s10 3 15 1v3a9 9 0 0 1-9 9H9a9 9 0 0 1-9-9z" fill="#8f5546"></path>
+        <path d="M0 24c5-3 10-3 16-1s11 2 16 0v0a9 9 0 0 1-9 9H9a9 9 0 0 1-9-9z" fill="#33302f"></path>
+      </svg>
+    </div>
+    <button class="tool on" id="tool-gallery" title="Gallery" aria-label="Gallery">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h7v6H4zM13 5h7v6h-7zM4 13h7v6H4zM13 13h7v6h-7z"></path></svg>
+    </button>
+    <button class="tool" id="tool-upload" title="Upload a shader" aria-label="Upload a shader">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V4M7.5 8.5L12 4l4.5 4.5M5 19h14"></path></svg>
+    </button>
+  </nav>
+
+  <div class="workspace">
+    <section class="gallery" aria-label="Community shaders">
+      <div class="gallery-head">
+        <h1>Community shaders</h1>
+        <span class="count"><span class="live-dot" id="live-dot"></span><span id="count">Loading…</span></span>
+        <span class="grow"></span>
+        <label class="search">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM16 16l4 4"></path></svg>
+          <input id="search" type="text" placeholder="Search shaders" spellcheck="false" autocomplete="off">
+        </label>
+        <button class="btn primary" id="open-upload">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V4M7.5 8.5L12 4l4.5 4.5M5 19h14"></path></svg>
+          Upload a shader
+        </button>
+        <button class="btn" id="get-app" title="Download the Wallshaders installer for Windows 10 and 11">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"></path></svg>
+          <span id="get-app-text">Download the app</span>
+        </button>
+      </div>
+      <div class="grid-scroll">
+        <div class="grid" id="grid"></div>
+        <div class="empty" id="empty"><strong>Opening the gallery…</strong>Shaders shared by the community will appear here.</div>
+      </div>
+    </section>
+
+    <section class="detail" id="detail" aria-label="Shader preview">
+      <div class="pane-head">
+        <span class="label" id="pane-label">Preview</span>
+        <span class="pane-name" id="pane-name"></span>
+        <span class="grow"></span>
+        <span class="stat" id="fps"></span>
+        <button class="icon-btn" id="playpause" title="Pause preview" aria-label="Pause preview">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path id="playpause-path" d="M8 5v14M16 5v14"></path></svg>
+        </button>
+      </div>
+      <div class="frame">
+        <div class="stage" id="stage">
+          <canvas id="live"></canvas>
+          <p class="stage-msg" id="stage-msg">Pick a shader to see it move.</p>
+        </div>
+      </div>
+
+      <div class="info" id="info" hidden>
+        <h2 id="info-name"></h2>
+        <div class="byline">by <b id="info-author"></b><span class="official" id="info-official" hidden>Official</span></div>
+        <p class="description" id="info-description"></p>
+        <div class="actions">
+          <button class="btn primary big" id="download">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"></path></svg>
+            Download shader
+          </button>
+          <button class="btn big" id="copy">Copy code</button>
+          <button class="btn big danger" id="remove" hidden>Remove</button>
+        </div>
+        <div class="confirm" id="confirm" hidden>
+          <span>Remove this shader from the gallery for everyone?</span>
+          <button class="btn danger" id="confirm-yes">Remove</button>
+          <button class="btn" id="confirm-no">Keep</button>
+        </div>
+        <p class="hint">To use it: download the file, open Wallshaders, press Import in the toolbar and pick the file. Then press Set as wallpaper.</p>
+      </div>
+
+      <form class="upload" id="upload" hidden novalidate>
+        <h2>Upload a shader</h2>
+        <p class="notice" id="up-notice" hidden></p>
+        <div id="up-fields">
+          <div class="upload" style="padding:0">
+            <label class="field"><span>Name</span>
+              <input type="text" id="up-name" maxlength="60" placeholder="Evening Fog" spellcheck="false" autocomplete="off">
+            </label>
+            <label class="field"><span>Description (optional)</span>
+              <textarea id="up-desc" maxlength="600" rows="3" placeholder="What it looks like, and anything worth knowing."></textarea>
+            </label>
+            <label class="field"><span>Shader code (must define mainImage)</span>
+              <textarea id="up-code" spellcheck="false" autocomplete="off" placeholder="void mainImage(out vec4 fragColor, in vec2 fragCoord) { ... }"></textarea>
+            </label>
+            <div class="file-row">
+              <label class="btn" for="up-file">Choose a file</label>
+              <input type="file" id="up-file" accept=".glsl,.frag,.fs,.txt,text/plain">
+              <span>.glsl or .txt, exported from Wallshaders</span>
+            </div>
+            <div class="problems" id="up-problems" hidden>
+              <div class="problems-title" id="up-problems-title"></div>
+              <ul id="up-problems-list"></ul>
+            </div>
+            <div class="actions">
+              <button type="submit" class="btn primary big" id="up-submit">Upload</button>
+              <button type="button" class="btn big" id="up-cancel">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </form>
+    </section>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---- shader wrapping: identical to the Wallshaders app ----
+  var HEADER_LINES = 2;
+  var UNIFORMS = "uniform vec3 iResolution; uniform float iTime; uniform float iTimeDelta; " +
+    "uniform float iFrameRate; uniform int iFrame; uniform vec4 iMouse; uniform vec4 iDate; out vec4 ws_fragColor;";
+  var FOOTER = "\nvoid main() { vec4 c = vec4(0.0, 0.0, 0.0, 1.0); mainImage(c, gl_FragCoord.xy); ws_fragColor = vec4(c.rgb, 1.0); }\n";
+  var VERTEX = "#version 300 es\nvoid main() { vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); " +
+    "gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
+  var UNIFORM_NAMES = ["iResolution", "iTime", "iTimeDelta", "iFrameRate", "iFrame", "iMouse", "iDate"];
+
+  var OFFICIAL_DOC = "wallshaders";
+  var MAX_CODE = 24000;
+  var MAX_DOC_BYTES = 230000;
+  var THUMB_TIME = 14;
+  var NAME_RULE = /^[\p{L}\p{N} \-_()]+$/u;
+
+  function wrap(code) {
+    return "#version 300 es\nprecision highp float; precision highp int; " + UNIFORMS + "\n" + code + FOOTER;
+  }
+
+  function parseErrors(log) {
+    var out = [];
+    String(log).split("\n").forEach(function (raw) {
+      var text = raw.replace(/\u0000/g, "").trim();
+      if (!text) return;
+      var m = /^(?:ERROR|WARNING):\s*\d+:(\d+):\s*(.*)$/.exec(text);
+      if (m) out.push({ line: Math.max(1, Number(m[1]) - HEADER_LINES), message: m[2] });
+      else out.push({ line: 1, message: text });
+    });
+    return out.length ? out : [{ line: 1, message: "The shader did not compile." }];
+  }
+
+  function createRenderer(canvas) {
+    var gl = null;
+    try { gl = canvas.getContext("webgl2", { antialias: false, alpha: false, powerPreference: "low-power" }); } catch (e) {}
+    if (!gl) return null;
+    gl.bindVertexArray(gl.createVertexArray());
+
+    function stage(kind, text) {
+      var sh = gl.createShader(kind);
+      gl.shaderSource(sh, text);
+      gl.compileShader(sh);
+      if (gl.getShaderParameter(sh, gl.COMPILE_STATUS)) return { sh: sh };
+      var log = gl.getShaderInfoLog(sh) || "Compile failed";
+      gl.deleteShader(sh);
+      return { log: log };
+    }
+
+    return {
+      compile: function (code) {
+        var vs = stage(gl.VERTEX_SHADER, VERTEX);
+        if (!vs.sh) return { errors: [{ line: 1, message: vs.log }] };
+        var fs = stage(gl.FRAGMENT_SHADER, wrap(code));
+        if (!fs.sh) { gl.deleteShader(vs.sh); return { errors: parseErrors(fs.log) }; }
+        var program = gl.createProgram();
+        gl.attachShader(program, vs.sh);
+        gl.attachShader(program, fs.sh);
+        gl.linkProgram(program);
+        gl.deleteShader(vs.sh);
+        gl.deleteShader(fs.sh);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+          var log = gl.getProgramInfoLog(program) || "Link failed";
+          gl.deleteProgram(program);
+          return { errors: [{ line: 1, message: log.trim() }] };
+        }
+        var u = {};
+        UNIFORM_NAMES.forEach(function (n) { u[n] = gl.getUniformLocation(program, n); });
+        return { program: program, u: u };
+      },
+      draw: function (prog, time, dt, frame) {
+        var d = new Date();
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.useProgram(prog.program);
+        gl.uniform3f(prog.u.iResolution, canvas.width, canvas.height, 1);
+        gl.uniform1f(prog.u.iTime, time);
+        gl.uniform1f(prog.u.iTimeDelta, dt);
+        gl.uniform1f(prog.u.iFrameRate, 30);
+        gl.uniform1i(prog.u.iFrame, frame);
+        gl.uniform4f(prog.u.iMouse, 0, 0, 0, 0);
+        gl.uniform4f(prog.u.iDate, d.getFullYear(), d.getMonth(), d.getDate(),
+          d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds());
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      },
+      free: function (prog) { if (prog && prog.program) gl.deleteProgram(prog.program); }
+    };
+  }
+
+  // ---- elements ----
+  function $(id) { return document.getElementById(id); }
+  var grid = $("grid"), empty = $("empty"), count = $("count"), liveDot = $("live-dot");
+  var info = $("info"), upload = $("upload"), stageMsg = $("stage-msg");
+  var liveCanvas = $("live"), stageEl = $("stage");
+
+  // ---- state ----
+  var db = null, user = null, downloads = null;
+  var me = { id: null, isOwner: false, canWrite: null };
+  var docs = new Map();          // doc id -> body, as last delivered
+  var items = [];                // flattened shaders, newest first
+  var names = {};                // author id -> display name
+  var cards = new Map();         // key -> { el, code, ... }
+  var freshKeys = new Set();     // arrived while this page was open
+  var loaded = false;
+  var selectedKey = null;
+  var mode = "detail";           // or "upload"
+  var query = "";
+
+  // ---- toast ----
+  var toastTimer = 0;
+  function toast(text, bad) {
+    var el = $("toast");
+    el.textContent = text;
+    el.classList.toggle("bad", !!bad);
+    el.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.hidden = true; }, bad ? 6000 : 2600);
+  }
+
+  // ---- still thumbnails: one shared offscreen WebGL canvas ----
+  var thumbCanvas = document.createElement("canvas");
+  thumbCanvas.width = 480;
+  thumbCanvas.height = 270;
+  var thumbGL = createRenderer(thumbCanvas);
+  var thumbQueue = [];
+  var thumbBusy = false;
+
+  function paintPlaceholder(canvas, text) {
+    var ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#211f1e";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#7d756f";
+    ctx.font = "22px 'Segoe UI', system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+  }
+
+  function nextThumb() {
+    var job = thumbQueue.shift();
+    if (!job) { thumbBusy = false; return; }
+    thumbBusy = true;
+    if (!thumbGL) {
+      paintPlaceholder(job.canvas, "No preview on this device");
+    } else {
+      var prog = thumbGL.compile(job.code);
+      if (prog.errors) {
+        paintPlaceholder(job.canvas, "This shader has errors");
+      } else {
+        thumbGL.draw(prog, THUMB_TIME, 1 / 30, 420);
+        job.canvas.getContext("2d").drawImage(thumbCanvas, 0, 0, job.canvas.width, job.canvas.height);
+        thumbGL.free(prog);
+      }
+    }
+    setTimeout(nextThumb, 20);
+  }
+
+  function queueThumb(canvas, code) {
+    thumbQueue.push({ canvas: canvas, code: code });
+    if (!thumbBusy) nextThumb();
+  }
+
+  // ---- live preview ----
+  var live = createRenderer(liveCanvas);
+  var liveProg = null, liveCode = null;
+  var reducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var playing = !reducedMotion;
+  var time = THUMB_TIME, frame = 0, lastDraw = 0, redraw = true, shown = 0, secondStart = 0;
+
+  /** Show a script in the big preview. Returns its compile errors (empty when it works). */
+  function setLive(code) {
+    if (!live) return [];
+    if (code === liveCode) return [];
+    var prog = live.compile(code);
+    if (prog.errors) return prog.errors;
+    live.free(liveProg);
+    liveProg = prog;
+    liveCode = code;
+    redraw = true;
+    return [];
+  }
+
+  function fitLive() {
+    var scale = Math.min(window.devicePixelRatio || 1, 1.5);
+    var w = Math.max(1, Math.round(stageEl.clientWidth * scale));
+    var h = Math.max(1, Math.round(stageEl.clientHeight * scale));
+    if (liveCanvas.width !== w || liveCanvas.height !== h) {
+      liveCanvas.width = w;
+      liveCanvas.height = h;
+      redraw = true;
+    }
+  }
+
+  function tick(now) {
+    requestAnimationFrame(tick);
+    if (now - secondStart >= 1000) {
+      $("fps").textContent = liveProg && playing ? Math.round(shown * 1000 / (now - secondStart)) + " fps" : "";
+      shown = 0;
+      secondStart = now;
+    }
+    if (!live || !liveProg) return;
+    fitLive();
+    if (!playing && !redraw) return;
+    if (playing && !redraw && now - lastDraw < 1000 / 30 - 2) return;
+    var dt = playing ? Math.min((now - lastDraw) / 1000, 0.1) : 0;
+    lastDraw = now;
+    time += dt;
+    redraw = false;
+    live.draw(liveProg, time, dt, frame++);
+    shown++;
+  }
+
+  function setPlaying(on) {
+    playing = on;
+    $("playpause-path").setAttribute("d", on ? "M8 5v14M16 5v14" : "M8 5.5v13l10.5-6.5z");
+    $("playpause").title = on ? "Pause preview" : "Play preview";
+    $("playpause").setAttribute("aria-label", $("playpause").title);
+  }
+  $("playpause").addEventListener("click", function () { setPlaying(!playing); });
+  setPlaying(playing);
+  requestAnimationFrame(tick);
+
+  // ---- helpers ----
+  function authorName(item) {
+    if (item.doc === OFFICIAL_DOC) return "Wallshaders";
+    return names[item.doc] || "Community member";
+  }
+  function selected() {
+    for (var i = 0; i < items.length; i++) if (items[i].key === selectedKey) return items[i];
+    return null;
+  }
+  function canUpload() { return !!db && (me.isOwner || !!me.id) && me.canWrite !== false; }
+  function myDoc() { return me.isOwner ? OFFICIAL_DOC : me.id; }
+  function canRemove(item) { return !!db && (me.isOwner || (me.id && item.doc === me.id)); }
+
+  // ---- gallery ----
+  function makeCard(item) {
+    var el = document.createElement("button");
+    el.type = "button";
+    el.className = "card";
+    var thumb = document.createElement("div");
+    thumb.className = "thumb";
+    var canvas = document.createElement("canvas");
+    canvas.width = 480;
+    canvas.height = 270;
+    thumb.appendChild(canvas);
+    var badge = document.createElement("span");
+    badge.className = "badge";
+    badge.textContent = "New";
+    badge.hidden = true;
+    thumb.appendChild(badge);
+    var text = document.createElement("div");
+    text.className = "card-text";
+    var name = document.createElement("span");
+    name.className = "card-name";
+    var author = document.createElement("span");
+    author.className = "card-author";
+    text.appendChild(name);
+    text.appendChild(author);
+    el.appendChild(thumb);
+    el.appendChild(text);
+    el.addEventListener("click", function () {
+      freshKeys.delete(item.key);
+      selectedKey = item.key;
+      mode = "detail";
+      render();
+      if (window.matchMedia("(max-width: 860px)").matches) $("detail").scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "start" });
+    });
+    return { el: el, canvas: canvas, badge: badge, name: name, author: author, code: null };
+  }
+
+  function renderGallery() {
+    var q = query.trim().toLowerCase();
+    var visible = items.filter(function (it) {
+      return !q || it.name.toLowerCase().indexOf(q) >= 0 || authorName(it).toLowerCase().indexOf(q) >= 0;
+    });
+    var alive = new Set();
+    var els = visible.map(function (it) {
+      var card = cards.get(it.key);
+      if (!card) { card = makeCard(it); cards.set(it.key, card); }
+      if (card.code !== it.code) { card.code = it.code; queueThumb(card.canvas, it.code); }
+      card.name.textContent = it.name;
+      card.author.textContent = "by " + authorName(it);
+      card.badge.hidden = !freshKeys.has(it.key);
+      card.el.classList.toggle("on", mode === "detail" && it.key === selectedKey);
+      card.el.setAttribute("aria-pressed", String(mode === "detail" && it.key === selectedKey));
+      alive.add(it.key);
+      return card.el;
+    });
+    grid.replaceChildren.apply(grid, els);
+    items.forEach(function (it) { alive.add(it.key); });
+    cards.forEach(function (_, key) { if (!alive.has(key)) cards.delete(key); });
+
+    if (loaded) {
+      count.textContent = items.length === 1 ? "1 shader" : items.length + " shaders";
+      empty.hidden = visible.length > 0;
+      if (!visible.length) {
+        empty.replaceChildren();
+        var strong = document.createElement("strong");
+        strong.textContent = items.length ? "No shader matches that search" : "No shaders yet";
+        empty.appendChild(strong);
+        empty.appendChild(document.createTextNode(items.length ? "Try a different name or author." : "Be the first: press Upload a shader."));
+      }
+    }
+  }
+
+  // ---- preview pane ----
+  function renderDetail() {
+    var uploading = mode === "upload";
+    $("tool-gallery").classList.toggle("on", !uploading);
+    $("tool-upload").classList.toggle("on", uploading);
+    upload.hidden = !uploading;
+
+    if (uploading) {
+      info.hidden = true;
+      $("pane-label").textContent = "Your shader";
+      $("pane-name").textContent = $("up-name").value.trim();
+      return;
+    }
+    $("pane-label").textContent = "Preview";
+    var item = selected();
+    info.hidden = !item;
+    if (!item) {
+      $("pane-name").textContent = "";
+      stageMsg.hidden = false;
+      stageMsg.textContent = loaded && !items.length ? "Nothing to preview yet." : "Pick a shader to see it move.";
+      return;
+    }
+    $("pane-name").textContent = item.name;
+    $("info-name").textContent = item.name;
+    $("info-author").textContent = authorName(item);
+    $("info-official").hidden = item.doc !== OFFICIAL_DOC;
+    var desc = $("info-description");
+    desc.textContent = item.description || "No description.";
+    desc.classList.toggle("none", !item.description);
+    $("remove").hidden = !canRemove(item);
+    $("confirm").hidden = true;
+
+    if (!live) {
+      stageMsg.hidden = false;
+      stageMsg.textContent = "This device can't draw live previews (WebGL2 is unavailable).";
+    } else {
+      var errors = setLive(item.code);
+      stageMsg.hidden = errors.length === 0;
+      if (errors.length) stageMsg.textContent = "This shader has errors and can't be previewed.";
+    }
+  }
+
+  function render() {
+    renderGallery();
+    renderDetail();
+  }
+
+  function resolveNames() {
+    if (!user) return;
+    var ids = [];
+    docs.forEach(function (_, id) { if (id !== OFFICIAL_DOC) ids.push(id); });
+    if (!ids.length) return;
+    user.profiles(ids).then(function (ps) {
+      var changed = false;
+      ids.forEach(function (id) {
+        var n = ps[id] && ps[id].name ? ps[id].name : "";
+        if (n && names[id] !== n) { names[id] = n; changed = true; }
+      });
+      if (changed) render();
+    });
+  }
+
+  // ---- download and copy ----
+  $("download").addEventListener("click", function () {
+    var item = selected();
+    if (!item) return;
+    if (!downloads) {
+      toast("Downloads aren't available in this view. Use Copy code instead.", true);
+      return;
+    }
+    downloads.save({ filename: item.name + ".txt", data: item.code }).then(function () {
+      toast("Saved. In Wallshaders, press Import and pick the file.");
+    }).catch(function (e) {
+      if (e && e.code === "declined") return;
+      if (e && e.code === "rate_limited") toast("A save prompt is already open.", true);
+      else toast("The file could not be saved here. Use Copy code instead.", true);
+    });
+  });
+
+  $("copy").addEventListener("click", function () {
+    var item = selected();
+    if (!item) return;
+    var done = function () { toast("Code copied. Paste it into a new shader in Wallshaders."); };
+    try {
+      navigator.clipboard.writeText(item.code).then(done).catch(function () {
+        toast("Copying is blocked in this view. Use Download shader instead.", true);
+      });
+    } catch (e) {
+      toast("Copying is blocked in this view. Use Download shader instead.", true);
+    }
+  });
+
+  // ---- download the app itself (the installer, zipped, published beside this page) ----
+  $("get-app").addEventListener("click", function () {
+    var button = this;
+    var label = $("get-app-text");
+    if (!downloads) {
+      toast("Downloads aren't available in this view. Open this page in a browser on claude.ai.", true);
+      return;
+    }
+    button.disabled = true;
+    label.textContent = "Preparing…";
+    fetch("Wallshaders-setup.zip").then(function (res) {
+      if (!res.ok) throw { code: "missing" };
+      return res.blob();
+    }).then(function (blob) {
+      return downloads.save({ filename: "Wallshaders-setup.zip", data: blob });
+    }).then(function () {
+      toast("Saved. Unzip it and run the installer inside.");
+    }).catch(function (e) {
+      if (e && e.code === "declined") return;
+      if (e && e.code === "rate_limited") toast("A save prompt is already open.", true);
+      else toast("The app could not be downloaded here. Try again in a moment.", true);
+    }).finally(function () {
+      button.disabled = false;
+      label.textContent = "Download the app";
+    });
+  });
+
+  // ---- remove ----
+  $("remove").addEventListener("click", function () { $("confirm").hidden = false; });
+  $("confirm-no").addEventListener("click", function () { $("confirm").hidden = true; });
+  $("confirm-yes").addEventListener("click", function () {
+    var item = selected();
+    if (!item || !db) return;
+    var body = docs.get(item.doc);
+    if (!body) return;
+    var next = JSON.parse(JSON.stringify(body));
+    if (next.items) delete next.items[item.id];
+    $("confirm-yes").disabled = true;
+    db.doc("shaders/" + item.doc).set(next).then(function () {
+      toast("Removed “" + item.name + "”");
+    }).catch(function () {
+      toast("That shader could not be removed. You may not have permission.", true);
+    }).finally(function () {
+      $("confirm-yes").disabled = false;
+      $("confirm").hidden = true;
+    });
+  });
+
+  // ---- upload ----
+  var draftErrors = [];
+  var draftTimer = 0;
+
+  function showProblems(list) {
+    var box = $("up-problems");
+    box.hidden = list.length === 0;
+    if (!list.length) return;
+    $("up-problems-title").textContent = list.length === 1 ? "1 problem in this shader" : list.length + " problems in this shader";
+    var ul = $("up-problems-list");
+    ul.replaceChildren();
+    list.slice(0, 6).forEach(function (e) {
+      var li = document.createElement("li");
+      var ln = document.createElement("span");
+      ln.className = "ln";
+      ln.textContent = "Line " + e.line;
+      li.appendChild(ln);
+      li.appendChild(document.createTextNode(e.message));
+      ul.appendChild(li);
+    });
+  }
+
+  function checkDraft() {
+    var code = $("up-code").value;
+    if (!code.trim()) {
+      draftErrors = [];
+      showProblems([]);
+      stageMsg.hidden = false;
+      stageMsg.textContent = "Paste your shader code to see it here.";
+      return;
+    }
+    if (code.length > MAX_CODE) {
+      draftErrors = [{ line: 1, message: "The code is too long (" + MAX_CODE.toLocaleString() + " characters at most)." }];
+    } else if (!live) {
+      draftErrors = [];
+    } else {
+      draftErrors = setLive(code);
+    }
+    showProblems(draftErrors);
+    stageMsg.hidden = draftErrors.length === 0 && !!live;
+    if (draftErrors.length) stageMsg.textContent = "Fix the problems below to see the preview.";
+    else if (!live) stageMsg.textContent = "This device can't draw live previews.";
+  }
+
+  function openUpload() {
+    mode = "upload";
+    var notice = $("up-notice");
+    var allowed = canUpload();
+    $("up-fields").hidden = !allowed;
+    notice.hidden = allowed;
+    if (!allowed) {
+      notice.textContent = !db
+        ? "Sign in to claude.ai to upload a shader. The gallery only accepts uploads from signed-in people."
+        : "Your access to this page is view-only, so you can browse and download but not upload. Ask the owner for Contributor access.";
+    }
+    render();
+    checkDraft();
+    if (window.matchMedia("(max-width: 860px)").matches) $("detail").scrollIntoView({ block: "start" });
+  }
+
+  function closeUpload() {
+    mode = "detail";
+    render();
+  }
+
+  $("tool-upload").addEventListener("click", openUpload);
+  $("open-upload").addEventListener("click", openUpload);
+  $("tool-gallery").addEventListener("click", closeUpload);
+  $("up-cancel").addEventListener("click", closeUpload);
+  $("up-name").addEventListener("input", function () { if (mode === "upload") $("pane-name").textContent = this.value.trim(); });
+  $("up-code").addEventListener("input", function () {
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(checkDraft, 300);
+  });
+  $("up-file").addEventListener("change", function () {
+    var file = this.files && this.files[0];
+    this.value = "";
+    if (!file) return;
+    if (file.size > 200000) { toast("That file is too large to be a shader script.", true); return; }
+    var reader = new FileReader();
+    reader.onload = function () {
+      $("up-code").value = String(reader.result || "");
+      if (!$("up-name").value.trim()) {
+        var stem = file.name.replace(/\.[^.]*$/, "").replace(/[^\p{L}\p{N} \-_()]+/gu, " ").replace(/\s+/g, " ").trim().slice(0, 60);
+        $("up-name").value = stem;
+        $("pane-name").textContent = stem;
+      }
+      checkDraft();
+    };
+    reader.onerror = function () { toast("That file could not be read.", true); };
+    reader.readAsText(file);
+  });
+
+  upload.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    if (!canUpload()) return;
+    var name = $("up-name").value.trim();
+    var description = $("up-desc").value.trim();
+    var code = $("up-code").value;
+
+    if (!name) { toast("Give your shader a name.", true); $("up-name").focus(); return; }
+    if (!NAME_RULE.test(name)) { toast("Use only letters, numbers, spaces, - _ ( ) in the name.", true); $("up-name").focus(); return; }
+    if (!code.trim()) { toast("Paste the shader code, or choose a file.", true); $("up-code").focus(); return; }
+    clearTimeout(draftTimer);
+    checkDraft();
+    if (draftErrors.length) { toast("Fix the problems in the code before uploading.", true); return; }
+    if (code.indexOf("mainImage") < 0) { toast("The code must define a mainImage function.", true); return; }
+
+    var docId = myDoc();
+    var id = "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    var entry = { name: name, description: description, code: code, createdAt: Date.now() };
+    var existing = docs.get(docId);
+    if (existing && JSON.stringify(existing).length + JSON.stringify(entry).length > MAX_DOC_BYTES) {
+      toast("You've reached the upload limit. Remove one of your shaders first.", true);
+      return;
+    }
+
+    var ref = db.doc("shaders/" + docId);
+    var patch = { items: {} };
+    patch.items[id] = entry;
+    var button = $("up-submit");
+    button.disabled = true;
+    button.textContent = "Uploading…";
+    // `update` merges into the existing list; `set` creates it the first time.
+    (existing ? ref.update(patch) : ref.set(patch)).then(function () {
+      $("up-name").value = "";
+      $("up-desc").value = "";
+      $("up-code").value = "";
+      selectedKey = docId + "/" + id;
+      mode = "detail";
+      render();
+      toast("“" + name + "” is now in the gallery");
+    }).catch(function (e) {
+      var code = e && e.code;
+      if (code === "quota_exceeded") toast("The gallery is full. Ask the owner to remove some shaders.", true);
+      else if (code === "invalid_argument") toast("The upload was refused. You may not have permission to add shaders.", true);
+      else toast("The upload did not go through. Check your connection and try again.", true);
+    }).finally(function () {
+      button.disabled = false;
+      button.textContent = "Upload";
+    });
+  });
+
+  $("search").addEventListener("input", function () { query = this.value; renderGallery(); });
+
+  // ---- data ----
+  function onShaders(snap) {
+    var known = new Set(items.map(function (it) { return it.key; }));
+    var nextDocs = new Map();
+    var next = [];
+    snap.docs.forEach(function (d) {
+      var body = d.data() || {};
+      nextDocs.set(d.id, body);
+      var list = body.items && typeof body.items === "object" ? body.items : {};
+      Object.keys(list).forEach(function (id) {
+        var it = list[id];
+        if (!it || typeof it.code !== "string" || !it.code.trim()) return;
+        next.push({
+          key: d.id + "/" + id,
+          doc: d.id,
+          id: id,
+          name: String(it.name || "Untitled").slice(0, 60),
+          description: typeof it.description === "string" ? it.description.slice(0, 600) : "",
+          code: it.code.slice(0, MAX_CODE),
+          createdAt: Number(it.createdAt) || 0
+        });
+      });
+    });
+    next.sort(function (a, b) { return b.createdAt - a.createdAt || (a.key < b.key ? -1 : 1); });
+    if (loaded) next.forEach(function (it) { if (!known.has(it.key) && it.key !== selectedKey) freshKeys.add(it.key); });
+    docs = nextDocs;
+    items = next;
+    loaded = true;
+    if (!selected()) selectedKey = items.length ? items[0].key : null;
+    resolveNames();
+    render();
+  }
+
+  function showUnavailable(title, body) {
+    count.textContent = "Offline";
+    liveDot.classList.remove("on");
+    if (items.length) return;
+    empty.hidden = false;
+    empty.replaceChildren();
+    var strong = document.createElement("strong");
+    strong.textContent = title;
+    empty.appendChild(strong);
+    empty.appendChild(document.createTextNode(body));
+  }
+
+  render();
+
+  (async function start() {
+    var use = window.claude && window.claude.use ? window.claude.use.bind(window.claude) : function () { return Promise.resolve(null); };
+    var got = await Promise.all([use("db"), use("user"), use("downloads")]);
+    db = got[0]; user = got[1]; downloads = got[2];
+
+    if (user) {
+      var viewer = await user.me();
+      me.id = viewer.id;
+      me.isOwner = !!viewer.isOwner;
+      me.canWrite = await user.can("data.write");
+    }
+    if (!db) {
+      showUnavailable("Sign in to see the gallery", "The community gallery is available to people signed in to claude.ai.");
+      stageMsg.textContent = "Sign in to claude.ai to browse shaders.";
+      return;
+    }
+
+    // If the store has not answered in 10 seconds, say so; the listener keeps trying.
+    var slow = setTimeout(function () {
+      showUnavailable("The gallery can't be reached yet", "Still trying. Check your connection.");
+    }, 10000);
+
+    db.collection("shaders").onSnapshot(function (snap) {
+      if (!snap.metadata.fromCache) {
+        clearTimeout(slow);
+        liveDot.classList.add("on");
+        liveDot.title = "Updates live when someone uploads";
+      }
+      onShaders(snap);
+    }, function () {
+      clearTimeout(slow);
+      showUnavailable("The gallery is unavailable", "Reopen this page to try again.");
+    });
+  })();
+})();
+</script>

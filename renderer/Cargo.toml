@@ -1,0 +1,38 @@
+[package]
+name = "wallshaders-renderer"
+version = "0.1.0"
+edition = "2021"
+description = "Low-overhead OpenGL wallpaper renderer for Wallshaders"
+
+[lib]
+name = "wallshaders_renderer"
+path = "src/lib.rs"
+
+# Standalone binary, used for development and testing without building the full app.
+[[bin]]
+name = "ws-renderer"
+path = "src/main.rs"
+
+[dependencies]
+glow = "0.16"
+png = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dependencies.windows-sys]
+version = "0.59"
+features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_OpenGL",
+  "Win32_Graphics_Dwm",
+  "Win32_Security",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Power",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+]
