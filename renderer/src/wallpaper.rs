@@ -1,9 +1,15 @@
-//! The live wallpaper: a borderless window placed behind the desktop icons,
-//! a render loop with a frame-rate cap, and the rules that pause drawing.
+//! The live wallpaper: one borderless window per screen, placed behind the
+//! desktop icons, a render loop with a frame-rate cap, and the rules that
+//! pause drawing.
+//!
+//! Each screen draws its shader at its own size and shape. Screens showing the
+//! same shader at the same size share one render. A screen with no shader gets
+//! no window at all, so the normal Windows wallpaper shows there.
 
 use crate::config::{self, log, Config};
 use crate::control::{self, CONTROL_CLASS, WM_WS_RELOAD};
-use crate::glctx::{Frame, GlContext, Pipeline};
+use crate::glctx::{self, Frame, GlContext, Pipeline};
+use crate::monitors::{self, Monitor};
 use crate::shader;
 use crate::win::{class_name, wide};
 use std::ffi::c_void;
@@ -23,6 +29,7 @@ use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const WALL_CLASS: &str = "WallshadersWallpaper";
+const ANCHOR_CLASS: &str = "WallshadersGl";
 const WM_WS_TRAY: u32 = WM_APP + 2;
 const MENU_OPEN: usize = 1;
 const MENU_PAUSE: usize = 2;
@@ -187,6 +194,7 @@ unsafe extern "system" fn wall_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
 
 // --------------------------------------------------- behind-the-icons host
 
+#[derive(Clone, Copy)]
 struct Host {
     parent: HWND,
     /// Windows 11 24H2 and later: icons and wallpaper share Progman, so we must
@@ -234,116 +242,250 @@ unsafe fn find_host() -> Option<Host> {
     None
 }
 
-struct MonitorScan {
-    origin: (i32, i32),
-    height: i32,
-    targets: Vec<[i32; 4]>,
-    primary: (i32, i32),
+// ------------------------------------------------------- screens and views
+
+/// One shader drawn at one size. Screens with the same shader and size share it.
+struct View {
+    shader: String,
+    pipe: Pipeline,
+    ok: bool,
+    animated: bool,
+    wants_mouse: bool,
+    mouse: [f32; 4],
+    /// Frames still to draw even if the shader is static (after a load or a repaint).
+    dirty: u32,
 }
 
-unsafe extern "system" fn scan_monitor(mon: HMONITOR, _: HDC, _: *mut RECT, lp: LPARAM) -> BOOL {
-    let scan = &mut *(lp as *mut MonitorScan);
-    let mut info: MONITORINFO = std::mem::zeroed();
-    info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-    if GetMonitorInfoW(mon, &mut info) != 0 {
-        let r = info.rcMonitor;
-        let (x0, x1) = (r.left - scan.origin.0, r.right - scan.origin.0);
-        let (top, bottom) = (r.top - scan.origin.1, r.bottom - scan.origin.1);
-        scan.targets.push([x0, scan.height - bottom, x1, scan.height - top]);
-        if info.dwFlags & 1 != 0 {
-            scan.primary = (r.right - r.left, r.bottom - r.top);
-        }
-    }
-    1
+/// One screen's window behind the desktop icons.
+struct Screen {
+    id: String,
+    rect: (i32, i32, i32, i32), // x, y, width, height (virtual-screen pixels)
+    hmon: isize,
+    hwnd: HWND,
+    hdc: HDC,
+    view: usize,
+    covered: bool,
 }
 
 struct Surface {
-    hwnd: HWND,
+    anchor: HWND,
     ctx: Option<GlContext>,
-    pipe: Pipeline,
-    /// Where each monitor sits inside the window, in OpenGL coordinates.
-    targets: Vec<[i32; 4]>,
-    primary: (i32, i32),
+    host: Host,
+    layered: bool,
+    screens: Vec<Screen>,
+    views: Vec<View>,
+}
+
+unsafe fn create_hidden(hinst: HINSTANCE, class: &str) -> HWND {
+    let class = wide(class);
+    CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        class.as_ptr(),
+        class.as_ptr(),
+        WS_POPUP,
+        0,
+        0,
+        16,
+        16,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        hinst,
+        std::ptr::null(),
+    )
 }
 
 impl Surface {
     unsafe fn create(hinst: HINSTANCE) -> Result<Self, String> {
         let host = find_host().ok_or("The desktop window was not found")?;
         let layered = host.raised.is_some() && std::env::var_os("WALLSHADERS_NO_LAYERED").is_none();
+        // The OpenGL context lives on a small hidden window and draws into each
+        // screen's window in turn, so screens can come and go freely.
+        let anchor = create_hidden(hinst, ANCHOR_CLASS);
+        if anchor.is_null() {
+            return Err("Could not create the OpenGL window".into());
+        }
+        let ctx = match GlContext::create(anchor) {
+            Ok(c) => c,
+            Err(e) => {
+                DestroyWindow(anchor);
+                return Err(e);
+            }
+        };
+        log(&format!("attached to desktop (raised layout: {}, layered: {layered})", host.raised.is_some()));
+        Ok(Surface { anchor, ctx: Some(ctx), host, layered, screens: Vec::new(), views: Vec::new() })
+    }
+
+    fn host_alive(&self) -> bool {
+        unsafe { IsWindow(self.host.parent) != 0 && self.screens.iter().all(|s| IsWindow(s.hwnd) != 0) }
+    }
+
+    unsafe fn create_window(&self, hinst: HINSTANCE, m: &Monitor) -> Result<(HWND, HDC), String> {
         let class = wide(WALL_CLASS);
         let hwnd = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | if layered { WS_EX_LAYERED } else { 0 },
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | if self.layered { WS_EX_LAYERED } else { 0 },
             class.as_ptr(),
             class.as_ptr(),
             WS_POPUP,
             0,
             0,
-            16,
-            16,
+            m.width.max(1),
+            m.height.max(1),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             hinst,
             std::ptr::null(),
         );
         if hwnd.is_null() {
-            return Err("Could not create the wallpaper window".into());
+            return Err("Could not create a wallpaper window".into());
         }
-        if layered {
+        if self.layered {
             SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
         }
-        let ctx = match GlContext::create(hwnd) {
-            Ok(c) => c,
+        match self.ctx.as_ref().unwrap().attach(hwnd) {
+            Ok(hdc) => {
+                SetParent(hwnd, self.host.parent);
+                Ok((hwnd, hdc))
+            }
             Err(e) => {
                 DestroyWindow(hwnd);
-                return Err(e);
+                Err(e)
             }
-        };
-        let pipe = Pipeline::new(&ctx.gl)?;
-        SetParent(hwnd, host.parent);
-        let mut surface = Surface { hwnd, ctx: Some(ctx), pipe, targets: Vec::new(), primary: (1, 1) };
-        surface.layout();
-        match host.raised {
+        }
+    }
+
+    unsafe fn destroy_screen(&self, s: &Screen) {
+        if IsWindow(s.hwnd) != 0 {
+            ReleaseDC(s.hwnd, s.hdc);
+            DestroyWindow(s.hwnd);
+        }
+    }
+
+    unsafe fn drop_views(&mut self) {
+        let ctx = self.ctx.as_ref().unwrap();
+        ctx.make_own_current();
+        for mut v in self.views.drain(..) {
+            v.pipe.destroy(&ctx.gl);
+        }
+    }
+
+    /// Match the windows to the current screens and settings, and (re)compile
+    /// the shaders. Windows that can stay are kept, so there is no flicker.
+    unsafe fn rebuild(&mut self, hinst: HINSTANCE, cfg: &Config) {
+        let monitors = monitors::list();
+        let origin = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
+
+        // Views: one per (shader, size).
+        self.drop_views();
+        let ctx = self.ctx.as_ref().unwrap();
+        ctx.make_own_current();
+        let mut wanted: Vec<(&Monitor, usize)> = Vec::new();
+        for m in &monitors {
+            let Some(name) = cfg.shader_for(&m.id) else { continue };
+            let w = ((m.width as f32 * cfg.render_scale).round() as i32).max(1);
+            let h = ((m.height as f32 * cfg.render_scale).round() as i32).max(1);
+            let index = match self.views.iter().position(|v| v.shader == name && v.pipe.size() == (w, h)) {
+                Some(i) => i,
+                None => {
+                    let mut pipe = match Pipeline::new(&ctx.gl) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            log(&format!("could not create a render target: {e}"));
+                            continue;
+                        }
+                    };
+                    pipe.resize(&ctx.gl, w, h);
+                    let mut view = View { shader: name.to_string(), pipe, ok: false, animated: false, wants_mouse: false, mouse: [0.0; 4], dirty: 3 };
+                    match std::fs::read_to_string(config::shader_path(name)) {
+                        Ok(src) => match view.pipe.compile(&ctx.gl, &src) {
+                            Ok(()) => {
+                                view.ok = true;
+                                view.animated = shader::is_animated(&src);
+                                view.wants_mouse = shader::uses_mouse(&src);
+                            }
+                            Err(e) => log(&format!("shader {name:?} failed to compile:\n{e}")),
+                        },
+                        Err(e) => log(&format!("cannot read shader {name:?}: {e}")),
+                    }
+                    log(&format!("view {name:?} at {w}x{h} (animated: {})", view.animated));
+                    self.views.push(view);
+                    self.views.len() - 1
+                }
+            };
+            wanted.push((m, index));
+        }
+
+        // Windows: keep the ones whose screen is unchanged, drop the rest.
+        let old = std::mem::take(&mut self.screens);
+        let mut keep: Vec<Screen> = Vec::new();
+        for s in old {
+            let still = wanted.iter().any(|(m, _)| m.id == s.id && (m.x, m.y, m.width, m.height) == s.rect);
+            if still && IsWindow(s.hwnd) != 0 {
+                keep.push(s);
+            } else {
+                self.destroy_screen(&s);
+            }
+        }
+        let mut changed = false;
+        for (m, view) in wanted {
+            let rect = (m.x, m.y, m.width, m.height);
+            if let Some(pos) = keep.iter().position(|s| s.id == m.id) {
+                let mut s = keep.swap_remove(pos);
+                s.view = view;
+                s.hmon = m.handle;
+                self.screens.push(s);
+                continue;
+            }
+            match self.create_window(hinst, m) {
+                Ok((hwnd, hdc)) => {
+                    // Child windows are placed relative to the desktop host, which
+                    // covers the whole virtual screen.
+                    SetWindowPos(hwnd, std::ptr::null_mut(), m.x - origin.0, m.y - origin.1, m.width, m.height, SWP_NOZORDER | SWP_NOACTIVATE);
+                    self.screens.push(Screen { id: m.id.clone(), rect, hmon: m.handle, hwnd, hdc, view, covered: false });
+                    changed = true;
+                }
+                Err(e) => log(&format!("screen {}: {e}", m.name)),
+            }
+        }
+        if changed {
+            self.order_windows();
+        }
+        ctx.make_own_current();
+    }
+
+    /// Put every screen window right behind the desktop icons.
+    unsafe fn order_windows(&self) {
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        match self.host.raised {
             Some((defview, workerw)) => {
-                // Order inside Progman, top to bottom: icons, us, the static wallpaper.
-                let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-                SetWindowPos(hwnd, defview, 0, 0, 0, 0, flags | SWP_SHOWWINDOW);
-                SetWindowPos(workerw, hwnd, 0, 0, 0, 0, flags);
+                // Order inside Progman, top to bottom: icons, our windows, the static wallpaper.
+                let mut above = defview;
+                for s in &self.screens {
+                    SetWindowPos(s.hwnd, above, 0, 0, 0, 0, flags | SWP_SHOWWINDOW);
+                    above = s.hwnd;
+                }
+                SetWindowPos(workerw, above, 0, 0, 0, 0, flags);
             }
             None => {
-                ShowWindow(hwnd, SW_SHOWNA);
+                for s in &self.screens {
+                    ShowWindow(s.hwnd, SW_SHOWNA);
+                }
             }
         }
-        log(&format!("attached to desktop (raised layout: {}, layered: {layered})", host.raised.is_some()));
-        Ok(surface)
-    }
-
-    /// Cover the whole virtual screen and note where each monitor is.
-    unsafe fn layout(&mut self) {
-        let origin = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
-        let (w, h) = (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
-        SetWindowPos(self.hwnd, std::ptr::null_mut(), 0, 0, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
-        let mut scan = MonitorScan { origin, height: h, targets: Vec::new(), primary: (w, h) };
-        EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(scan_monitor), &mut scan as *mut MonitorScan as LPARAM);
-        if scan.targets.is_empty() {
-            scan.targets.push([0, 0, w, h]);
-        }
-        self.targets = scan.targets;
-        self.primary = scan.primary;
-    }
-
-    unsafe fn apply_scale(&mut self, scale: f32) {
-        let w = (self.primary.0 as f32 * scale).round() as i32;
-        let h = (self.primary.1 as f32 * scale).round() as i32;
-        self.pipe.resize(&self.ctx.as_ref().unwrap().gl, w, h);
     }
 }
 
 impl Drop for Surface {
     fn drop(&mut self) {
-        self.ctx.take();
         unsafe {
-            if IsWindow(self.hwnd) != 0 {
-                DestroyWindow(self.hwnd);
+            if self.ctx.is_some() {
+                self.drop_views();
+            }
+            for s in std::mem::take(&mut self.screens) {
+                self.destroy_screen(&s);
+            }
+            self.ctx.take();
+            if IsWindow(self.anchor) != 0 {
+                DestroyWindow(self.anchor);
             }
         }
     }
@@ -351,18 +493,14 @@ impl Drop for Surface {
 
 // ----------------------------------------------------------- pause rules
 
-struct Coverage {
-    covered: Vec<HMONITOR>,
+fn is_shell_class(class: &str) -> bool {
+    matches!(class, "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | WALL_CLASS | ANCHOR_CLASS | CONTROL_CLASS)
 }
 
 unsafe fn monitor_rect(mon: HMONITOR) -> Option<RECT> {
     let mut info: MONITORINFO = std::mem::zeroed();
     info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
     (GetMonitorInfoW(mon, &mut info) != 0).then_some(info.rcMonitor)
-}
-
-fn is_shell_class(class: &str) -> bool {
-    matches!(class, "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | WALL_CLASS | CONTROL_CLASS)
 }
 
 /// Does this window fill its monitor? Returns the monitor and whether the window is maximized.
@@ -392,22 +530,22 @@ unsafe fn fills_monitor(hwnd: HWND) -> Option<(HMONITOR, bool)> {
 }
 
 unsafe extern "system" fn scan_coverage(hwnd: HWND, lp: LPARAM) -> BOOL {
-    let cov = &mut *(lp as *mut Coverage);
+    let covered = &mut *(lp as *mut Vec<isize>);
     if let Some((mon, _)) = fills_monitor(hwnd) {
-        if !cov.covered.contains(&mon) {
-            cov.covered.push(mon);
+        if !covered.contains(&(mon as isize)) {
+            covered.push(mon as isize);
         }
     }
     1
 }
 
-/// Returns (a fullscreen app is in front, every monitor is hidden behind a window).
-unsafe fn probe_desktop(monitor_count: usize) -> (bool, bool) {
+/// Returns (a fullscreen app is in front, the monitors hidden behind a window).
+unsafe fn probe_desktop() -> (bool, Vec<isize>) {
     let fg = GetForegroundWindow();
     let fullscreen = !fg.is_null() && matches!(fills_monitor(fg), Some((_, false)));
-    let mut cov = Coverage { covered: Vec::new() };
-    EnumWindows(Some(scan_coverage), &mut cov as *mut Coverage as LPARAM);
-    (fullscreen, cov.covered.len() >= monitor_count.max(1))
+    let mut covered: Vec<isize> = Vec::new();
+    EnumWindows(Some(scan_coverage), &mut covered as *mut Vec<isize> as LPARAM);
+    (fullscreen, covered)
 }
 
 unsafe fn on_battery() -> bool {
@@ -438,6 +576,12 @@ unsafe fn local_date() -> [f32; 4] {
     [t.wYear as f32, t.wMonth as f32 - 1.0, t.wDay as f32, secs]
 }
 
+/// Hand back memory pages that are not in use right now (driver code that only
+/// runs while compiling, start-up data). Windows brings back any that are needed.
+unsafe fn trim_memory() {
+    SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+}
+
 unsafe fn register_class(hinst: HINSTANCE, name: &str, proc: WNDPROC) {
     let class = wide(name);
     let mut wc: WNDCLASSW = std::mem::zeroed();
@@ -461,6 +605,7 @@ unsafe fn run_inner(debug: bool) -> i32 {
     let hinst = GetModuleHandleW(std::ptr::null());
     register_class(hinst, CONTROL_CLASS, Some(ctrl_proc));
     register_class(hinst, WALL_CLASS, Some(wall_proc));
+    register_class(hinst, ANCHOR_CLASS, Some(DefWindowProcW));
     let ctrl_class = wide(CONTROL_CLASS);
     let ctrl = CreateWindowExW(
         WS_EX_TOOLWINDOW,
@@ -494,16 +639,15 @@ unsafe fn run_inner(debug: bool) -> i32 {
     let mut surface: Option<Surface> = None;
     let mut cfg = Config::load();
     let mut need_load = true;
-    let mut animated = true;
-    let mut wants_mouse = false;
-    let mut dirty_frames = 3u32;
     let mut shader_time = 0f64;
     let mut frame_index = 0i32;
     let mut last_frame = Instant::now();
     let mut next_frame = Instant::now();
     let mut last_rules: Option<Instant> = None;
-    let mut auto_paused = false;
+    let mut global_pause = false;
     let mut battery = false;
+    let mut trim_at: Option<Instant> = None;
+    let mut was_idle = false;
     let mut stat_frames = 0u32;
     let mut stat_since = Instant::now();
     let mut msg: MSG = std::mem::zeroed();
@@ -520,9 +664,9 @@ unsafe fn run_inner(debug: bool) -> i32 {
             break;
         }
 
-        // (Re)create the wallpaper window. It dies with Explorer, so this also
+        // (Re)attach to the desktop. The windows die with Explorer, so this also
         // recovers from an Explorer restart.
-        let alive = surface.as_ref().map(|s| IsWindow(s.hwnd) != 0).unwrap_or(false);
+        let alive = surface.as_ref().map(|s| s.host_alive()).unwrap_or(false);
         if !alive || REATTACH.swap(false, Relaxed) {
             surface = None;
             match Surface::create(hinst) {
@@ -542,55 +686,73 @@ unsafe fn run_inner(debug: bool) -> i32 {
         if RELOAD.swap(false, Relaxed) {
             need_load = true;
         }
+        if LAYOUT_DIRTY.swap(false, Relaxed) {
+            need_load = true;
+        }
         if need_load {
             need_load = false;
             cfg = Config::load();
-            if cfg.active_shader.is_none() {
-                log("no active shader, exiting");
+            if !cfg.has_any_shader() {
+                log("no shader on any screen, exiting");
                 break;
             }
-            let source = cfg.active_shader.as_ref().and_then(|n| std::fs::read_to_string(config::shader_path(n)).ok());
-            match source {
-                Some(src) => match s.pipe.compile(&s.ctx.as_ref().unwrap().gl, &src) {
-                    Ok(()) => {
-                        animated = shader::is_animated(&src);
-                        wants_mouse = shader::uses_mouse(&src);
-                        log(&format!("loaded shader {:?} (animated: {animated})", cfg.active_shader));
-                    }
-                    Err(e) => log(&format!("shader {:?} failed to compile:\n{e}", cfg.active_shader)),
-                },
-                None => log(&format!("no readable shader for {:?}", cfg.active_shader)),
-            }
-            s.apply_scale(cfg.render_scale);
-            dirty_frames = 3;
+            s.rebuild(hinst, &cfg);
             last_rules = None;
-        }
-        if LAYOUT_DIRTY.swap(false, Relaxed) {
-            s.layout();
-            s.apply_scale(cfg.render_scale);
-            dirty_frames = 3;
+            trim_at = Some(Instant::now() + Duration::from_secs(3));
+            if debug {
+                let list: Vec<String> = s.screens.iter().map(|x| format!("{:?} -> {}", x.rect, s.views[x.view].shader)).collect();
+                log(&format!("screens: {}", list.join(", ")));
+            }
         }
         if REDRAW.swap(false, Relaxed) {
-            dirty_frames = dirty_frames.max(1);
+            for v in &mut s.views {
+                v.dirty = v.dirty.max(1);
+            }
         }
 
         if last_rules.map(|t| t.elapsed() >= Duration::from_millis(500)).unwrap_or(true) {
             last_rules = Some(Instant::now());
-            let (fullscreen, covered) = probe_desktop(s.targets.len());
+            let (fullscreen, covered) = probe_desktop();
             battery = on_battery();
-            auto_paused = (cfg.pause_fullscreen && fullscreen)
-                || (cfg.pause_maximized && covered)
-                || (battery && cfg.battery_mode == "pause");
+            global_pause = (cfg.pause_fullscreen && fullscreen) || (battery && cfg.battery_mode == "pause");
+            for screen in &mut s.screens {
+                let now_covered = cfg.pause_maximized && covered.contains(&screen.hmon);
+                if screen.covered && !now_covered {
+                    // Coming back into view: make sure it shows a fresh picture.
+                    s.views[screen.view].dirty = s.views[screen.view].dirty.max(1);
+                }
+                screen.covered = now_covered;
+            }
         }
-        let paused = auto_paused || LOCKED.load(Relaxed) || DISPLAY_OFF.load(Relaxed) || USER_PAUSED.load(Relaxed);
-        if paused || (!animated && dirty_frames == 0) {
+        let paused = global_pause || LOCKED.load(Relaxed) || DISPLAY_OFF.load(Relaxed) || USER_PAUSED.load(Relaxed);
+
+        // Which views have something to draw this frame?
+        let mut work = vec![false; s.views.len()];
+        if !paused {
+            for screen in &s.screens {
+                let v = &s.views[screen.view];
+                if !screen.covered && (v.animated || v.dirty > 0) {
+                    work[screen.view] = true;
+                }
+            }
+        }
+        if !work.iter().any(|&w| w) {
+            if !was_idle {
+                was_idle = true;
+                trim_memory();
+            }
             if debug && stat_since.elapsed() >= Duration::from_secs(5) {
-                log(&format!("idle (paused: {paused}, static shader: {})", !animated));
+                log(&format!("idle (paused: {paused}, screens: {}, covered: {})", s.screens.len(), s.screens.iter().filter(|x| x.covered).count()));
                 stat_since = Instant::now();
                 stat_frames = 0;
             }
             wait_ms(timer, 500.0);
             continue;
+        }
+        was_idle = false;
+        if trim_at.map(|t| Instant::now() >= t).unwrap_or(false) {
+            trim_at = None;
+            trim_memory();
         }
 
         let now = Instant::now();
@@ -609,39 +771,54 @@ unsafe fn run_inner(debug: bool) -> i32 {
             next_frame = now + interval;
         }
 
-        let gl = &s.ctx.as_ref().unwrap().gl;
-        let mut frame = Frame {
-            time: shader_time as f32,
-            delta: delta as f32,
-            rate: fps as f32,
-            index: frame_index,
-            mouse: [0.0; 4],
-            date: local_date(),
-        };
-        if wants_mouse && cfg.mouse_input {
-            let mut p = POINT { x: 0, y: 0 };
-            GetCursorPos(&mut p);
-            let (w, h) = s.pipe.size();
-            let sx = w as f32 / s.primary.0 as f32;
-            let sy = h as f32 / s.primary.1 as f32;
-            frame.mouse = [p.x as f32 * sx, (s.primary.1 - p.y) as f32 * sy, 0.0, 0.0];
+        let date = local_date();
+        let mut cursor = POINT { x: 0, y: 0 };
+        let cursor_ok = cfg.mouse_input && GetCursorPos(&mut cursor) != 0;
+        let ctx = s.ctx.as_ref().unwrap();
+        let gl = &ctx.gl;
+        let mut drawn = vec![false; s.views.len()];
+        for screen in &s.screens {
+            let vi = screen.view;
+            if !work[vi] || screen.covered {
+                continue;
+            }
+            if !ctx.make_current(screen.hdc) {
+                continue;
+            }
+            let view = &mut s.views[vi];
+            if !drawn[vi] {
+                drawn[vi] = true;
+                if view.wants_mouse && cursor_ok {
+                    let (x, y, w, h) = screen.rect;
+                    if cursor.x >= x && cursor.x < x + w && cursor.y >= y && cursor.y < y + h {
+                        let (fw, fh) = view.pipe.size();
+                        view.mouse = [(cursor.x - x) as f32 * fw as f32 / w as f32, (y + h - cursor.y) as f32 * fh as f32 / h as f32, 0.0, 0.0];
+                    }
+                }
+                let frame = Frame { time: shader_time as f32, delta: delta as f32, rate: fps as f32, index: frame_index, mouse: view.mouse, date };
+                view.pipe.render(gl, &frame);
+            }
+            view.pipe.present(gl, screen.rect.2, screen.rect.3);
+            glctx::swap(screen.hdc);
         }
-        s.pipe.render(gl, &frame);
-        s.pipe.present(gl, &s.targets);
-        s.ctx.as_ref().unwrap().swap();
+        for (v, d) in s.views.iter_mut().zip(&drawn) {
+            if *d {
+                v.dirty = v.dirty.saturating_sub(1);
+            }
+        }
         frame_index = frame_index.wrapping_add(1);
-        dirty_frames = dirty_frames.saturating_sub(1);
 
         if debug {
             stat_frames += 1;
             if stat_since.elapsed() >= Duration::from_secs(5) {
                 let secs = stat_since.elapsed().as_secs_f32();
+                let views: Vec<String> = s.views.iter().map(|v| format!("{} {:?} ok={}", v.shader, v.pipe.size(), v.ok)).collect();
                 log(&format!(
-                    "{:.1} fps, target {fps}, buffer {:?}, monitors {}, has shader: {}",
+                    "{:.1} fps, target {fps}, screens {} (covered {}), views [{}]",
                     stat_frames as f32 / secs,
-                    s.pipe.size(),
-                    s.targets.len(),
-                    s.pipe.has_program()
+                    s.screens.len(),
+                    s.screens.iter().filter(|x| x.covered).count(),
+                    views.join("; ")
                 ));
                 stat_frames = 0;
                 stat_since = Instant::now();

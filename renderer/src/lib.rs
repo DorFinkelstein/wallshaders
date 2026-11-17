@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod control;
+pub mod monitors;
 pub mod shader;
 
 mod glctx;
@@ -17,7 +18,8 @@ pub const USAGE: &str = "Wallshaders renderer
   --renderer [--debug]                 run as the desktop wallpaper
   --check <script.glsl>                compile a script; errors go to stderr, exit code 1
   --headless <script.glsl> --out <file.png> [--size WxH] [--time SECONDS]
-                                       draw one frame to a PNG, invisibly";
+                                       draw one frame to a PNG, invisibly
+  --monitors                           list the screens as JSON";
 
 fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(|s| s.as_str())
@@ -29,6 +31,10 @@ pub fn run_cli(args: &[String]) -> Option<i32> {
     if args.iter().any(|a| a == "--renderer") {
         let debug = args.iter().any(|a| a == "--debug");
         return Some(wallpaper::run(debug));
+    }
+    if args.iter().any(|a| a == "--monitors") {
+        println!("{}", serde_json::to_string_pretty(&monitors::list()).unwrap_or_default());
+        return Some(0);
     }
     if let Some(path) = value_after(args, "--check") {
         return Some(match headless::check(path) {

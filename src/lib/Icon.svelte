@@ -19,6 +19,9 @@
     monitor: "M4 5h16v11H4zM9 20h6M12 16v4",
     search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM16 16l4 4",
     alert: "M12 4l9 16H3zM12 10v4M12 17v.5",
+    chevron: "M7 10l5 5 5-5",
+    sliders: "M4 7h10M18 7h2M4 17h4M12 17h8M16 5v4M10 15v4",
+    update: "M12 4v10M7.5 9.5L12 14l4.5-4.5M5 19h14",
   };
 </script>
 

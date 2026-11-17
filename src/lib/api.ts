@@ -7,17 +7,34 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 
 export interface Config {
   active_shader: string | null;
+  /** Per-screen choices by screen id; "" means the normal Windows wallpaper. */
+  screens: Record<string, string>;
   fps: number;
   render_scale: number;
   pause_fullscreen: boolean;
   pause_maximized: boolean;
   battery_mode: "none" | "half" | "pause";
   mouse_input: boolean;
+  /** Look for a new version when the app starts. */
+  check_updates: boolean;
+}
+
+export interface ScreenStatus {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  primary: boolean;
+  /** What the screen shows now; null means the normal Windows wallpaper. */
+  shader: string | null;
 }
 
 export interface Status {
   running: boolean;
+  /** The shader shared by screens without their own choice. */
   active: string | null;
+  /** Left to right. */
+  screens: ScreenStatus[];
 }
 
 export const inApp = "__TAURI_INTERNALS__" in window;
@@ -33,18 +50,47 @@ const mock = {
   shaders: new Map<string, string>(
     Object.entries(builtins).map(([path, src]) => [path.split("/").pop()!.replace(/\.glsl$/, ""), src]),
   ),
+  // Two pretend screens so the screen picker can be tried in a browser.
+  monitors: [
+    { id: "side", name: "Side screen", width: 2560, height: 1080, primary: false },
+    {
+      id: "main",
+      name: "Main screen",
+      width: window.screen.width > 0 ? window.screen.width : 1920,
+      height: window.screen.height > 0 ? window.screen.height : 1080,
+      primary: true,
+    },
+  ],
   config: {
     active_shader: null,
+    screens: {},
     fps: 30,
     render_scale: 0.75,
     pause_fullscreen: true,
     pause_maximized: true,
     battery_mode: "half",
     mouse_input: false,
+    check_updates: true,
   } as Config,
   running: false,
   autostart: false,
 };
+
+function mockShaderFor(id: string): string | null {
+  const own = mock.config.screens[id];
+  if (own !== undefined) return own || null;
+  return mock.config.active_shader;
+}
+
+function mockAnyShader(): boolean {
+  return mock.config.active_shader !== null || Object.values(mock.config.screens).some((s) => s);
+}
+
+function mockForget(name: string) {
+  if (mock.config.active_shader === name) mock.config.active_shader = null;
+  for (const [id, s] of Object.entries(mock.config.screens)) if (s === name) delete mock.config.screens[id];
+  if (!mockAnyShader()) mock.running = false;
+}
 
 function checkName(name: string): string {
   const n = name.trim();
@@ -66,10 +112,7 @@ async function mockCall(cmd: string, a: Record<string, any>): Promise<any> {
       return;
     case "delete_shader":
       m.shaders.delete(a.name);
-      if (m.config.active_shader === a.name) {
-        m.config.active_shader = null;
-        m.running = false;
-      }
+      mockForget(a.name);
       return;
     case "rename_shader": {
       const next = checkName(a.newName);
@@ -78,6 +121,7 @@ async function mockCall(cmd: string, a: Record<string, any>): Promise<any> {
       m.shaders.delete(a.name);
       m.shaders.set(next, src);
       if (m.config.active_shader === a.name) m.config.active_shader = next;
+      for (const [id, s] of Object.entries(m.config.screens)) if (s === a.name) m.config.screens[id] = next;
       return next;
     }
     case "restore_builtins":
@@ -88,19 +132,33 @@ async function mockCall(cmd: string, a: Record<string, any>): Promise<any> {
     case "get_config":
       return { ...m.config };
     case "set_config":
-      m.config = { ...a.config, active_shader: m.config.active_shader };
+      m.config = { ...a.config, active_shader: m.config.active_shader, screens: m.config.screens };
       return { ...m.config };
     case "apply_wallpaper":
       if (!m.shaders.get(a.name)?.includes("mainImage")) throw "0(1) : error: mainImage is not defined";
-      m.config.active_shader = a.name;
+      if (a.screen) {
+        m.config.screens[a.screen] = a.name;
+      } else {
+        m.config.active_shader = a.name;
+        m.config.screens = {};
+      }
       m.running = true;
       return;
     case "stop_wallpaper":
-      m.running = false;
-      m.config.active_shader = null;
+      if (a.screen) {
+        m.config.screens[a.screen] = "";
+      } else {
+        m.config.active_shader = null;
+        m.config.screens = {};
+      }
+      if (!mockAnyShader()) m.running = false;
       return;
     case "wallpaper_status":
-      return { running: m.running, active: m.running ? m.config.active_shader : null };
+      return {
+        running: m.running,
+        active: m.running ? m.config.active_shader : null,
+        screens: m.monitors.map((s) => ({ ...s, shader: m.running ? mockShaderFor(s.id) : null })),
+      };
     case "get_autostart":
       return m.autostart;
     case "set_autostart":
@@ -125,8 +183,10 @@ export const renameShader = (name: string, newName: string) => call<string>("ren
 export const restoreBuiltins = () => call<void>("restore_builtins");
 export const getConfig = () => call<Config>("get_config");
 export const setConfig = (config: Config) => call<Config>("set_config", { config });
-export const applyWallpaper = (name: string) => call<void>("apply_wallpaper", { name });
-export const stopWallpaper = () => call<void>("stop_wallpaper");
+/** Show a shader on every screen (`screen` = null) or on one screen. */
+export const applyWallpaper = (name: string, screen: string | null) => call<void>("apply_wallpaper", { name, screen });
+/** Stop everywhere (`screen` = null), or give one screen back its normal wallpaper. */
+export const stopWallpaper = (screen: string | null = null) => call<void>("stop_wallpaper", { screen });
 export const wallpaperStatus = () => call<Status>("wallpaper_status");
 export const getAutostart = () => call<boolean>("get_autostart");
 export const setAutostart = (enabled: boolean) => call<void>("set_autostart", { enabled });

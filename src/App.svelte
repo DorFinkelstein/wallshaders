@@ -9,6 +9,9 @@
   import Library from "./lib/Library.svelte";
   import Preview from "./lib/Preview.svelte";
   import Settings from "./lib/Settings.svelte";
+  import ShaderParams from "./lib/ShaderParams.svelte";
+  import { paramsDiffer, parseParams, resetParams, setParam, type Param } from "./lib/params";
+  import { currentVersion, findUpdate, type AvailableUpdate } from "./lib/updates";
 
   interface Tab {
     id: number;
@@ -32,13 +35,21 @@
   let drawer = $state<"library" | "settings" | null>(null);
   let config = $state<Config | null>(null);
   let autostart = $state(false);
-  let status = $state<api.Status>({ running: false, active: null });
+  let status = $state<api.Status>({ running: false, active: null, screens: [] });
+  /** Screen that "Set as wallpaper" and "Stop" act on; null means every screen. */
+  let target = $state<string | null>(null);
   let previewErrors = $state<ShaderError[]>([]);
   let applyErrors = $state<ShaderError[]>([]);
   let applying = $state(false);
   let toast = $state<{ text: string; bad: boolean } | null>(null);
   let question = $state<Question | null>(null);
   let editorWidth = $state(46); // percent of the space shared with the preview
+  let version = $state("");
+  let update = $state<AvailableUpdate | null>(null);
+  let updateOpen = $state(false);
+  let checkingUpdates = $state(false);
+  /** Download progress while installing (0–1, or null when the size is unknown); undefined when idle. */
+  let updateProgress = $state<number | null | undefined>(undefined);
   let workspace: HTMLDivElement;
   let editor = $state<ReturnType<typeof Editor>>();
 
@@ -48,6 +59,43 @@
   const active = $derived(tabs.find((t) => t.id === activeId) ?? null);
   const errors = $derived(previewErrors.length ? previewErrors : applyErrors);
   const showEditor = $derived(editorOpen && active !== null);
+
+  const params = $derived(active ? parseParams(active.source) : []);
+  const paramsChanged = $derived(!!active && paramsDiffer(active.source, active.saved));
+
+  function changeParam(param: Param, value: Param["value"]) {
+    if (active) active.source = setParam(active.source, param, value);
+  }
+
+  function resetAllParams() {
+    if (active) active.source = resetParams(active.source, active.saved);
+  }
+
+  const screens = $derived(status.screens);
+  const multiScreen = $derived(screens.length > 1);
+  const targetScreen = $derived(screens.find((s) => s.id === target) ?? null);
+  /** Every shader on the desktop right now, on any screen. */
+  const onDesktop = $derived([...new Set(screens.map((s) => s.shader).filter((s): s is string => !!s))]);
+  const sameEverywhere = $derived(screens.length > 0 && screens.every((s) => s.shader === screens[0].shader));
+  /** The preview takes the shape of the screen it is for. */
+  const previewAspect = $derived.by(() => {
+    const s = targetScreen ?? screens.find((x) => x.primary) ?? screens[0];
+    return s && s.width > 0 && s.height > 0 ? `${s.width} / ${s.height}` : undefined;
+  });
+  const liveHere = $derived(
+    !!active && (targetScreen ? targetScreen.shader === active.name : sameEverywhere && screens[0]?.shader === active.name),
+  );
+
+  function screenLabel(id: string): string {
+    const index = screens.findIndex((s) => s.id === id);
+    const s = screens[index];
+    return s ? `Screen ${index + 1} · ${s.name}${s.primary ? " (main)" : ""}` : "Screen";
+  }
+
+  // A screen that was unplugged can no longer be picked.
+  $effect(() => {
+    if (target !== null && screens.length > 0 && !screens.some((s) => s.id === target)) target = null;
+  });
 
   function notify(text: string, bad = false) {
     toast = { text, bad };
@@ -167,10 +215,10 @@
   }
 
   async function deleteShader(name: string) {
-    const onDesktop = status.active === name;
+    const live = onDesktop.includes(name);
     const choice = await ask(
       `Delete “${name}”?`,
-      onDesktop ? "It is your current wallpaper, so the wallpaper will stop too. This cannot be undone." : "This cannot be undone.",
+      live ? "It is on your desktop, so it will be taken off too. This cannot be undone." : "This cannot be undone.",
       [
         { label: "Cancel", value: "cancel" },
         { label: "Delete", value: "delete", primary: true },
@@ -198,8 +246,9 @@
     applyErrors = [];
     try {
       if (tab.source !== tab.saved && !(await save(tab))) return;
-      await api.applyWallpaper(tab.name);
-      notify(`“${tab.name}” is now your wallpaper`);
+      const screen = targetScreen;
+      await api.applyWallpaper(tab.name, screen?.id ?? null);
+      notify(screen && multiScreen ? `“${tab.name}” is now on ${screenLabel(screen.id)}` : `“${tab.name}” is now your wallpaper`);
     } catch (e) {
       // The wallpaper renderer rejected the script; its log already uses script line numbers.
       applyErrors = parseErrors(api.errorText(e), true);
@@ -211,9 +260,10 @@
   }
 
   async function stopWallpaper() {
-    await attempt(api.stopWallpaper);
-    status = { running: false, active: null };
-    notify("Wallpaper stopped");
+    const screen = multiScreen ? targetScreen : null;
+    if ((await attempt(() => api.stopWallpaper(screen?.id ?? null).then(() => true))) !== true) return;
+    status = (await attempt(api.wallpaperStatus)) ?? status;
+    notify(screen ? `Stopped on ${screenLabel(screen.id)}` : "Wallpaper stopped");
   }
 
   async function changeConfig(next: Config) {
@@ -230,6 +280,46 @@
     if ((await attempt(() => api.restoreBuiltins().then(() => true))) !== true) return;
     await refresh();
     notify("Starter shaders restored");
+  }
+
+  async function checkForUpdates() {
+    checkingUpdates = true;
+    try {
+      update = await findUpdate();
+      if (update) updateOpen = true;
+      else notify(`You have the latest version (${version})`);
+    } catch (e) {
+      notify(`Could not check for updates: ${api.errorText(e)}`, true);
+    } finally {
+      checkingUpdates = false;
+    }
+  }
+
+  async function installUpdate() {
+    if (!update || updateProgress !== undefined) return;
+    const dirty = tabs.filter((t) => t.source !== t.saved);
+    if (dirty.length) {
+      updateOpen = false;
+      const choice = await ask("Save your changes before updating?", "Wallshaders restarts to finish the update.", [
+        { label: "Cancel", value: "cancel" },
+        { label: "Don't save", value: "discard" },
+        { label: "Save all", value: "save", primary: true },
+      ]);
+      if (choice === "cancel") return;
+      if (choice === "save") {
+        for (const tab of dirty) if (!(await save(tab))) return;
+      }
+      updateOpen = true;
+    }
+    updateProgress = 0;
+    try {
+      // On success the installer closes this window and opens the new version.
+      await update.install((p) => (updateProgress = p));
+    } catch (e) {
+      notify(`The update could not be installed: ${api.errorText(e)}`, true);
+    } finally {
+      updateProgress = undefined;
+    }
   }
 
   function toggleDrawer(which: "library" | "settings") {
@@ -254,6 +344,7 @@
   function onkeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
       if (question) answer("cancel");
+      else if (updateOpen && updateProgress === undefined) updateOpen = false;
       else drawer = null;
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
@@ -267,10 +358,23 @@
       config = (await attempt(api.getConfig)) ?? null;
       autostart = (await attempt(api.getAutostart)) ?? false;
       await refresh();
-      const first = status.active ?? config?.active_shader ?? shaders[0];
+      const first = status.active ?? onDesktop[0] ?? config?.active_shader ?? shaders[0];
       if (first && shaders.includes(first)) await openShader(first);
       else if (shaders.length) await openShader(shaders[0]);
       else drawer = "library";
+
+      version = await currentVersion().catch(() => "");
+      // A quiet look for a new version; no message if there is none or the check fails.
+      if (config?.check_updates !== false) {
+        findUpdate()
+          .then((found) => {
+            update = found;
+            if (found) notify(`Wallshaders ${found.version} is available`);
+            // Only set when building the end-to-end update test; never in a release build.
+            if (found && import.meta.env.VITE_TEST_AUTO_UPDATE === "1") installUpdate();
+          })
+          .catch(() => {});
+      }
     })();
 
     // The wallpaper can be stopped from its tray icon, so keep the status fresh.
@@ -332,6 +436,12 @@
     <button onclick={newShader} title="New shader"><Icon name="plus" size={21} /></button>
     <button onclick={importShaders} title="Import shaders from files"><Icon name="import" size={21} /></button>
     <div class="spacer"></div>
+    {#if update}
+      <button class="update-btn" onclick={() => (updateOpen = true)} title="Wallshaders {update.version} is available">
+        <Icon name="update" size={21} />
+        <span class="update-dot"></span>
+      </button>
+    {/if}
     <button class:on={drawer === "settings"} onclick={() => toggleDrawer("settings")} title="Settings">
       <Icon name="settings" size={21} />
     </button>
@@ -373,7 +483,17 @@
 
     <section class="preview-pane">
       {#if active}
-        <Preview name={active.name} source={active.source} fps={config?.fps ?? 30} onerrors={(list) => (previewErrors = list)} />
+        <Preview
+          name={active.name}
+          source={active.source}
+          fps={config?.fps ?? 30}
+          aspect={previewAspect}
+          onerrors={(list) => (previewErrors = list)}
+        />
+
+        {#if params.length}
+          <ShaderParams {params} changed={paramsChanged} onchange={changeParam} onreset={resetAllParams} />
+        {/if}
 
         {#if errors.length}
           <div class="errors" role="alert">
@@ -388,18 +508,52 @@
 
         <footer>
           <div class="status">
-            {#if status.running && status.active}
+            {#if onDesktop.length}
               <span class="live"></span>
-              <span class="status-text">On desktop: <b>{status.active}</b></span>
-              <button class="btn" onclick={stopWallpaper}><Icon name="stop" size={14} />Stop</button>
+              {#if !multiScreen || sameEverywhere}
+                <span class="status-text">On desktop: <b>{onDesktop[0]}</b></span>
+              {:else}
+                <span class="screens-text">
+                  {#each screens as s, i (s.id)}
+                    <span class="screen-state" title={screenLabel(s.id)}>
+                      <span class="screen-number">{i + 1}</span>{#if s.shader}<b>{s.shader}</b>{:else}<span class="dim">Windows wallpaper</span>{/if}
+                    </span>
+                  {/each}
+                </span>
+              {/if}
+              <button
+                class="btn"
+                onclick={stopWallpaper}
+                disabled={multiScreen && targetScreen !== null && !targetScreen.shader}
+                title={multiScreen && targetScreen ? `Show the normal Windows wallpaper on ${screenLabel(targetScreen.id)}` : "Stop the shader wallpaper"}
+              >
+                <Icon name="stop" size={14} />{multiScreen && targetScreen ? `Stop on screen ${screens.indexOf(targetScreen) + 1}` : "Stop"}
+              </button>
             {:else}
               <span class="status-text dim">No shader wallpaper is running</span>
             {/if}
           </div>
-          <button class="btn primary" onclick={applyWallpaper} disabled={applying}>
-            <Icon name="monitor" size={16} />
-            {applying ? "Applying…" : status.running && status.active === active.name ? "Update wallpaper" : "Set as wallpaper"}
-          </button>
+          <div class="apply">
+            {#if multiScreen}
+              <label class="target" title="Which screen to set the wallpaper on">
+                <span class="sr-only">Screen</span>
+                <select
+                  value={target ?? ""}
+                  onchange={(e) => (target = e.currentTarget.value || null)}
+                >
+                  <option value="">All screens</option>
+                  {#each screens as s (s.id)}
+                    <option value={s.id}>{screenLabel(s.id)}</option>
+                  {/each}
+                </select>
+                <Icon name="chevron" size={13} />
+              </label>
+            {/if}
+            <button class="btn primary" onclick={applyWallpaper} disabled={applying}>
+              <Icon name="monitor" size={16} />
+              {applying ? "Applying…" : liveHere ? "Update wallpaper" : "Set as wallpaper"}
+            </button>
+          </div>
         </footer>
       {:else}
         <div class="welcome">
@@ -421,7 +575,7 @@
           <Library
             {shaders}
             current={active?.name ?? null}
-            wallpaper={status.running ? status.active : null}
+            wallpaper={onDesktop}
             onopen={openShader}
             onnew={newShader}
             onimport={importShaders}
@@ -431,7 +585,16 @@
             ondelete={deleteShader}
           />
         {:else if config}
-          <Settings {config} {autostart} onchange={changeConfig} onautostart={changeAutostart} onrestore={restoreBuiltins} />
+          <Settings
+            {config}
+            {autostart}
+            {version}
+            checking={checkingUpdates}
+            onchange={changeConfig}
+            onautostart={changeAutostart}
+            onrestore={restoreBuiltins}
+            oncheckupdates={checkForUpdates}
+          />
         {/if}
       </aside>
     {/if}
@@ -439,6 +602,30 @@
 
   {#if toast}
     <div class="toast" class:bad={toast.bad} role="status">{toast.text}</div>
+  {/if}
+
+  {#if updateOpen && update}
+    <div class="modal-scrim">
+      <div class="modal update-modal" role="dialog" aria-modal="true" aria-label="Update Wallshaders">
+        <h2>Wallshaders {update.version} is available</h2>
+        <p class="update-sub">You have version {version}.</p>
+        {#if update.notes}
+          <div class="notes">{update.notes}</div>
+        {/if}
+        {#if updateProgress !== undefined}
+          <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={updateProgress === null ? undefined : Math.round(updateProgress * 100)}>
+            <div class="bar" class:unknown={updateProgress === null} style:width="{(updateProgress ?? 0.35) * 100}%"></div>
+          </div>
+          <p class="update-sub">{updateProgress === 1 ? "Installing… Wallshaders will close and open again." : "Downloading…"}</p>
+        {:else}
+          <p class="update-sub">Wallshaders closes while the update installs and opens again when it is done. Your wallpaper comes back too.</p>
+        {/if}
+        <div class="modal-actions">
+          <button class="btn" onclick={() => (updateOpen = false)} disabled={updateProgress !== undefined}>Later</button>
+          <button class="btn primary" onclick={installUpdate} disabled={updateProgress !== undefined}>Update and restart</button>
+        </div>
+      </div>
+    </div>
   {/if}
 
   {#if question}
@@ -646,9 +833,10 @@
   }
   footer {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
+    gap: 10px 12px;
     flex: none;
     padding: 12px 18px;
     border-top: 1px solid var(--line);
@@ -658,6 +846,7 @@
     align-items: center;
     gap: 10px;
     min-width: 0;
+    flex: 1 1 280px;
   }
   .status-text {
     overflow: hidden;
@@ -681,6 +870,82 @@
   footer .btn.primary {
     height: 36px;
     padding: 0 18px;
+  }
+  .screens-text {
+    display: flex;
+    gap: 14px;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .screen-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    max-width: 200px;
+  }
+  .screen-state b,
+  .screen-state .dim {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .screen-number {
+    display: inline-grid;
+    place-items: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 4px;
+    border-radius: 5px;
+    background: var(--bg-3);
+    color: var(--text-dim);
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .apply {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
+    margin-left: auto;
+  }
+  .target {
+    position: relative;
+    display: flex;
+    align-items: center;
+    color: var(--text-dim);
+  }
+  .target select {
+    appearance: none;
+    height: 36px;
+    max-width: 260px;
+    padding: 0 30px 0 12px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--bg-2);
+    color: var(--text);
+    font: inherit;
+    text-overflow: ellipsis;
+    cursor: pointer;
+  }
+  .target select:hover {
+    border-color: var(--text-faint);
+  }
+  .target select:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .target :global(svg) {
+    position: absolute;
+    right: 10px;
+    pointer-events: none;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
   }
 
   /* ---- empty state ---- */
@@ -770,5 +1035,64 @@
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+  }
+
+  /* ---- updates ---- */
+  .update-btn {
+    color: var(--accent-bright) !important;
+  }
+  .update-dot {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 2px var(--bg-0);
+  }
+  .update-modal {
+    width: min(460px, 88vw);
+  }
+  .update-modal .update-sub {
+    margin: 0 0 14px;
+  }
+  .notes {
+    max-height: 200px;
+    overflow-y: auto;
+    margin: 0 0 16px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    white-space: pre-wrap;
+    font-size: 12.5px;
+    line-height: 1.5;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .progress {
+    height: 6px;
+    margin: 0 0 10px;
+    border-radius: 6px;
+    background: var(--bg-0);
+    overflow: hidden;
+  }
+  .progress .bar {
+    height: 100%;
+    border-radius: 6px;
+    background: var(--accent);
+    transition: width 0.15s;
+  }
+  .progress .bar.unknown {
+    animation: slide 1.1s ease-in-out infinite alternate;
+  }
+  @keyframes slide {
+    from {
+      transform: translateX(-60%);
+    }
+    to {
+      transform: translateX(220%);
+    }
   }
 </style>

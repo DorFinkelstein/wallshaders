@@ -28,6 +28,22 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
 Available inputs: `iResolution`, `iTime`, `iTimeDelta`, `iFrameRate`, `iFrame`, `iMouse`, `iDate`. Textures, audio and multi-pass buffers are not supported.
 
+### Settings
+
+Top-level constants marked with a comment get a slider or colour picker under the preview:
+
+```glsl
+float speed = 1.0;                      // @slider 0.0 3.0 Speed
+int count = 12;                         // @slider 1 40 Number of lights
+vec3 skyColor = vec3(0.10, 0.12, 0.20); // @color Sky
+```
+
+The file stays ordinary GLSL, so it runs anywhere. Moving a control rewrites the number in the code (undoable, saved with the file). The preview turns these lines into uniforms so dragging does not recompile; if a constant is used where only constants are allowed, such as an array size, the preview recompiles on each change instead. Parsing lives in `src/lib/params.ts`.
+
+## Screens
+
+Each screen gets its own window behind the icons and draws the shader at its own size and shape. `config.json` holds `active_shader` (every screen) and `screens` (per-screen choices by monitor id; `""` means the normal Windows wallpaper on that screen). Screens with the same shader and size share one render. A screen covered by a maximized window stops drawing on its own.
+
 ## Develop
 
 ```bash
@@ -37,10 +53,20 @@ npm run dev          # interface only, in a browser, with a stand-in backend
 npm run app:build    # installer in target/release/bundle/nsis/
 ```
 
+## Release
+
+Installed copies update themselves from GitHub releases. Each release needs the installer and a `latest.json`, both made by:
+
+```bash
+.\scripts\release.ps1 -Notes "What changed"            # build and sign; add -Publish to create the GitHub release
+```
+
+Bump the version in `src-tauri/tauri.conf.json`, both `Cargo.toml` files and `package.json` first. Updates are signed with the private key at `%USERPROFILE%\.tauri\wallshaders.key`; the matching public key is in `tauri.conf.json`. Keep a backup of that key: without it no installed copy will accept a new version.
+
 ## Test and debug
 
 ```bash
-npm test             # Rust unit tests
+npm test             # Rust unit tests and the settings parser tests
 npm run check        # type-check the interface
 ```
 
@@ -54,4 +80,4 @@ cargo run -p wallshaders-renderer -- --headless "shaders/Aurora.glsl" --out fram
 cargo run -p wallshaders-renderer -- --check my-shader.glsl
 ```
 
-`--renderer --debug` writes the measured frame rate and pause state to `wallshaders.log` every five seconds.
+`--renderer --debug` writes the measured frame rate, screens and pause state to `wallshaders.log` every five seconds. `--monitors` prints the screens and their ids as JSON.

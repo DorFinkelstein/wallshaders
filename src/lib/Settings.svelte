@@ -4,11 +4,14 @@
   interface Props {
     config: Config;
     autostart: boolean;
+    version: string;
+    checking: boolean;
     onchange: (config: Config) => void;
     onautostart: (enabled: boolean) => void;
     onrestore: () => void;
+    oncheckupdates: () => void;
   }
-  let { config, autostart, onchange, onautostart, onrestore }: Props = $props();
+  let { config, autostart, version, checking, onchange, onautostart, onrestore, oncheckupdates }: Props = $props();
 
   const FPS = [15, 24, 30, 60];
   const BATTERY: { value: Config["battery_mode"]; label: string }[] = [
@@ -66,7 +69,7 @@
     {@render toggle("Fullscreen apps and games", "Stops drawing while one is in front.", config.pause_fullscreen, (v) =>
       set("pause_fullscreen", v),
     )}
-    {@render toggle("Desktop is covered", "Stops drawing while maximized windows hide every screen.", config.pause_maximized, (v) =>
+    {@render toggle("Screen is covered", "Stops drawing on a screen while a maximized window hides it.", config.pause_maximized, (v) =>
       set("pause_maximized", v),
     )}
     <div class="field">
@@ -88,6 +91,17 @@
       set("mouse_input", v),
     )}
     <button class="btn restore" onclick={onrestore}>Restore the starter shaders</button>
+  </section>
+
+  <section>
+    <h3>Updates</h3>
+    {@render toggle("Check for updates", "Looks for a new version when Wallshaders opens.", config.check_updates, (v) =>
+      set("check_updates", v),
+    )}
+    <div class="version-row">
+      <span class="version">Version {version}</span>
+      <button class="btn" onclick={oncheckupdates} disabled={checking}>{checking ? "Checking…" : "Check now"}</button>
+    </div>
   </section>
 </div>
 
@@ -215,5 +229,15 @@
   }
   .restore {
     align-self: flex-start;
+  }
+  .version-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .version {
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
   }
 </style>

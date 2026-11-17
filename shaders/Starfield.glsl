@@ -1,5 +1,10 @@
 // Starfield — quiet twinkling stars over a charcoal night.
 
+float starDensity = 22.0;                 // @slider 8.0 50.0 Star density
+float twinkleSpeed = 1.0;                 // @slider 0.0 4.0 Twinkle speed
+vec3 starColor = vec3(1.00, 0.86, 0.76);  // @color Stars
+vec3 horizonColor = vec3(0.30, 0.15, 0.10); // @color Horizon glow
+
 float hash(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
     p += dot(p, p + 45.32);
@@ -24,12 +29,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3 col = mix(vec3(0.20, 0.15, 0.15), vec3(0.09, 0.09, 0.11), y);
 
     float drift = iTime * 0.004;
-    float s = stars(uv + vec2(drift, 0.0), 22.0, iTime)
-            + stars(uv + vec2(drift * 2.0, 3.0), 38.0, iTime * 1.3) * 0.6;
-    col += s * vec3(1.0, 0.86, 0.76);
+    float tw = iTime * twinkleSpeed;
+    float s = stars(uv + vec2(drift, 0.0), starDensity, tw)
+            + stars(uv + vec2(drift * 2.0, 3.0), starDensity * 38.0 / 22.0, tw * 1.3) * 0.6;
+    col += s * starColor;
 
     // A faint terracotta glow on the horizon
-    col += vec3(0.30, 0.15, 0.10) * exp(-y * 5.0);
+    col += horizonColor * exp(-y * 5.0);
 
     fragColor = vec4(col, 1.0);
 }

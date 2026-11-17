@@ -1,22 +1,37 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import Icon from "./Icon.svelte";
   import { VERTEX, parseErrors, wrapFragment, type ShaderError } from "./glsl";
+  import { parseParams, withUniforms, type Param } from "./params";
 
   interface Props {
     name: string;
     source: string;
     /** Frame-rate cap, the same one the wallpaper uses. */
     fps: number;
+    /** Shape of the screen the shader is for, as "width / height". */
+    aspect?: string;
     onerrors: (errors: ShaderError[]) => void;
   }
-  let { name, source, fps, onerrors }: Props = $props();
+  let { name, source, fps, aspect: screenAspect, onerrors }: Props = $props();
 
   let canvas: HTMLCanvasElement;
   let stage: HTMLDivElement;
   let gl: WebGL2RenderingContext | null = null;
   let program: WebGLProgram | null = null;
   let uniforms: Record<string, WebGLUniformLocation | null> = {};
+
+  // Shader settings (see params.ts). While the controls are uniforms, moving a
+  // slider only changes a uniform; no recompile.
+  const params = $derived(parseParams(source));
+  const uniformSource = $derived(withUniforms(source, params));
+  /** The uniform version did not compile (a constant used where only constants
+   *  are allowed), so the preview recompiles the plain script on every change. */
+  let literal = $state(false);
+  let failedUniformSource = "";
+  let usingUniforms = false;
+  let paramUniforms = new Map<string, WebGLUniformLocation | null>();
+  let liveParams: Param[] = [];
 
   let playing = $state(true);
   let measuredFps = $state(0);
@@ -33,7 +48,8 @@
 
   // Shape the preview like the screen the wallpaper will cover.
   const screenOk = window.screen.width > 0 && window.screen.height > 0;
-  const aspect = screenOk ? `${window.screen.width} / ${window.screen.height}` : "16 / 9";
+  const fallbackAspect = screenOk ? `${window.screen.width} / ${window.screen.height}` : "16 / 9";
+  const aspect = $derived(screenAspect ?? fallbackAspect);
 
   function stageShader(kind: number, text: string): WebGLShader | string {
     const sh = gl!.createShader(kind)!;
@@ -45,35 +61,69 @@
     return log;
   }
 
-  /** Compile a script. If it fails, the last working picture stays on screen. */
-  function compile(text: string) {
-    if (!gl) return;
-    const vs = stageShader(gl.VERTEX_SHADER, VERTEX);
-    const fs = stageShader(gl.FRAGMENT_SHADER, wrapFragment(text));
+  /** Build a program from a script, or return its errors. */
+  function build(text: string): WebGLProgram | ShaderError[] {
+    const g = gl!;
+    const vs = stageShader(g.VERTEX_SHADER, VERTEX);
+    const fs = stageShader(g.FRAGMENT_SHADER, wrapFragment(text));
     if (typeof vs === "string" || typeof fs === "string") {
-      if (typeof vs !== "string") gl.deleteShader(vs);
-      onerrors(parseErrors(typeof fs === "string" ? fs : (vs as string)));
-      return;
+      if (typeof vs !== "string") g.deleteShader(vs);
+      if (typeof fs !== "string") g.deleteShader(fs);
+      return parseErrors(typeof fs === "string" ? fs : (vs as string));
     }
-    const next = gl.createProgram()!;
-    gl.attachShader(next, vs);
-    gl.attachShader(next, fs);
-    gl.linkProgram(next);
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    if (!gl.getProgramParameter(next, gl.LINK_STATUS)) {
-      onerrors(parseErrors(gl.getProgramInfoLog(next) ?? "Link failed", true));
-      gl.deleteProgram(next);
+    const next = g.createProgram()!;
+    g.attachShader(next, vs);
+    g.attachShader(next, fs);
+    g.linkProgram(next);
+    g.deleteShader(vs);
+    g.deleteShader(fs);
+    if (!g.getProgramParameter(next, g.LINK_STATUS)) {
+      const errors = parseErrors(g.getProgramInfoLog(next) ?? "Link failed", true);
+      g.deleteProgram(next);
+      return errors;
+    }
+    return next;
+  }
+
+  /** Compile the current script. If it fails, the last working picture stays on screen. */
+  function compile() {
+    if (!gl) return;
+    const raw = untrack(() => source);
+    const list = untrack(() => params);
+    const withU = untrack(() => uniformSource);
+    let next: WebGLProgram | ShaderError[] | null = null;
+    let viaUniforms = false;
+    if (list.length && withU !== failedUniformSource) {
+      next = build(withU);
+      viaUniforms = !Array.isArray(next);
+      if (!viaUniforms) failedUniformSource = withU;
+    }
+    if (!next || Array.isArray(next)) next = build(raw);
+    if (Array.isArray(next)) {
+      onerrors(next);
       return;
     }
     if (program) gl.deleteProgram(program);
     program = next;
+    usingUniforms = viaUniforms;
+    if (literal !== (list.length > 0 && !viaUniforms)) literal = list.length > 0 && !viaUniforms;
     uniforms = {};
     for (const u of ["iResolution", "iTime", "iTimeDelta", "iFrameRate", "iFrame", "iMouse", "iDate"]) {
       uniforms[u] = gl.getUniformLocation(next, u);
     }
+    paramUniforms = new Map(list.map((p) => [p.name, gl!.getUniformLocation(next as WebGLProgram, p.name)]));
     redraw = true;
     onerrors([]);
+  }
+
+  function setParamUniforms(g: WebGL2RenderingContext) {
+    for (const p of liveParams) {
+      const loc = paramUniforms.get(p.name);
+      if (!loc) continue;
+      if (p.kind === "color") g.uniform3fv(loc, p.value as [number, number, number]);
+      else if (p.kind === "int") g.uniform1i(loc, p.value as number);
+      else g.uniform1f(loc, p.value as number);
+    }
   }
 
   function draw(dt: number) {
@@ -94,6 +144,7 @@
       d.getDate(),
       d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds() + d.getMilliseconds() / 1000,
     );
+    if (usingUniforms) setParamUniforms(gl);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     frame++;
   }
@@ -157,11 +208,18 @@
     };
   });
 
-  // Recompile shortly after the script stops changing.
+  // Recompile shortly after the script stops changing. While the settings are
+  // uniforms, changing only their values does not count as a change.
   $effect(() => {
-    const text = source;
-    const timer = setTimeout(() => compile(text), 180);
+    void (literal ? source : uniformSource);
+    const timer = setTimeout(compile, 180);
     return () => clearTimeout(timer);
+  });
+
+  // New setting values show on the next frame, even while paused.
+  $effect(() => {
+    liveParams = params;
+    redraw = true;
   });
 </script>
 

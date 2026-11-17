@@ -12,6 +12,8 @@ pub struct GlContext {
     hwnd: HWND,
     hdc: HDC,
     hglrc: HGLRC,
+    format: i32,
+    pfd: PIXELFORMATDESCRIPTOR,
     pub gl: glow::Context,
 }
 
@@ -90,14 +92,38 @@ impl GlContext {
                 None => std::ptr::null(),
             }
         });
-        Ok(GlContext { hwnd, hdc, hglrc, gl })
+        Ok(GlContext { hwnd, hdc, hglrc, format, pfd, gl })
     }
 
-    pub fn swap(&self) {
-        unsafe {
-            SwapBuffers(self.hdc);
+    /// Prepare another window to be drawn with this context: it gets the same
+    /// pixel format. Returns the window's device context (kept for its lifetime,
+    /// since window classes used here are `CS_OWNDC`).
+    pub unsafe fn attach(&self, hwnd: HWND) -> Result<HDC, String> {
+        let hdc = GetDC(hwnd);
+        if hdc.is_null() {
+            return Err("GetDC failed".into());
         }
+        if SetPixelFormat(hdc, self.format, &self.pfd) == 0 {
+            ReleaseDC(hwnd, hdc);
+            return Err("Could not give the window an OpenGL pixel format".into());
+        }
+        Ok(hdc)
     }
+
+    /// Draw into `hdc` (from `attach`) from now on.
+    pub unsafe fn make_current(&self, hdc: HDC) -> bool {
+        wglMakeCurrent(hdc, self.hglrc) != 0
+    }
+
+    /// Draw into the context's own (hidden) window again.
+    pub unsafe fn make_own_current(&self) -> bool {
+        wglMakeCurrent(self.hdc, self.hglrc) != 0
+    }
+}
+
+/// Show what was drawn into a window's back buffer.
+pub unsafe fn swap(hdc: HDC) {
+    SwapBuffers(hdc);
 }
 
 impl Drop for GlContext {
@@ -147,10 +173,6 @@ impl Pipeline {
         let fbo = gl.create_framebuffer()?;
         let rbo = gl.create_renderbuffer()?;
         Ok(Pipeline { program: None, vao, fbo, rbo, size: (0, 0) })
-    }
-
-    pub fn has_program(&self) -> bool {
-        self.program.is_some()
     }
 
     pub fn size(&self) -> (i32, i32) {
@@ -235,15 +257,23 @@ impl Pipeline {
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
     }
 
-    /// Stretch the offscreen buffer onto rectangles `[x0, y0, x1, y1]` of the window
-    /// (OpenGL coordinates, origin bottom-left).
-    pub unsafe fn present(&self, gl: &glow::Context, targets: &[[i32; 4]]) {
+    /// Stretch the offscreen buffer over the whole current window (`w` × `h` pixels).
+    pub unsafe fn present(&self, gl: &glow::Context, w: i32, h: i32) {
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(self.fbo));
         gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
-        for t in targets {
-            gl.blit_framebuffer(0, 0, self.size.0, self.size.1, t[0], t[1], t[2], t[3], glow::COLOR_BUFFER_BIT, glow::LINEAR);
-        }
+        let filter = if self.size == (w, h) { glow::NEAREST } else { glow::LINEAR };
+        gl.blit_framebuffer(0, 0, self.size.0, self.size.1, 0, 0, w, h, glow::COLOR_BUFFER_BIT, filter);
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+    }
+
+    /// Free the GPU objects. The pipeline must not be used afterwards.
+    pub unsafe fn destroy(&mut self, gl: &glow::Context) {
+        if let Some((program, _)) = self.program.take() {
+            gl.delete_program(program);
+        }
+        gl.delete_vertex_array(self.vao);
+        gl.delete_framebuffer(self.fbo);
+        gl.delete_renderbuffer(self.rbo);
     }
 
     /// Read the offscreen buffer back as top-down RGBA rows.

@@ -1,6 +1,12 @@
 // Night Sky — stars that are born, flicker and die, shimmer that sweeps across
 // the sky in waves, shooting stars that cross the whole screen, and the odd satellite.
 
+float starBrightness = 1.0;                  // @slider 0.3 2.5 Star brightness
+float sparkle = 1.0;                         // @slider 0.0 2.0 Sparkle waves
+float formations = 1.0;                      // @slider 0.0 2.0 Formation brightness
+float shootingStars = 0.5;                   // @slider 0.0 1.0 Shooting stars
+vec3 horizonColor = vec3(0.030, 0.042, 0.085); // @color Horizon
+
 float hash11(float n) {
     return fract(sin(n * 127.1) * 43758.5453);
 }
@@ -249,7 +255,8 @@ vec3 formation(vec2 p, float cells, float seed) {
 // another, so it is never seen starting or stopping.
 vec3 shootingStar(vec2 p, float aspect, float slotLength, float seed) {
     float slot = floor(iTime / slotLength) + seed;
-    if (hash11(slot) < 0.5) return vec3(0.0);
+    // `shootingStars` is the chance that a time slot gets one.
+    if (hash11(slot) < 1.0 - shootingStars) return vec3(0.0);
 
     float duration = mix(1.5, 2.6, hash11(slot + 5.0));
     float begin = hash11(slot + 1.0) * (slotLength - duration);
@@ -334,7 +341,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // Sky: nearly black overhead, a little lighter and bluer toward the horizon,
     // with the horizon glow breathing very slowly.
     float breath = 0.88 + 0.12 * sin(t * 0.09);
-    vec3 col = mix(vec3(0.030, 0.042, 0.085) * breath, vec3(0.004, 0.006, 0.016), smoothstep(0.0, 0.9, height));
+    vec3 col = mix(horizonColor * breath, vec3(0.004, 0.006, 0.016), smoothstep(0.0, 0.9, height));
 
     // A faint uneven band across the sky. It stays where it is but slowly
     // changes shape, like thin haze.
@@ -351,15 +358,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // sparkle roll across the sky.
     float airA = noise(p * 2.0 + vec2(t * 0.13, t * 0.05));
     float airB = noise(p * 3.1 - vec2(t * 0.09, -t * 0.11));
-    float air = 0.4 + 2.6 * airA * airB;
+    float air = mix(1.0, 0.4 + 2.6 * airA * airB, sparkle);
 
     float crowd = clamp(cloud * 1.1 - 0.1, 0.0, 1.0);
     vec3 stars = starLayer(p, 26.0, 0.0, crowd, 4.5, air);
     stars += starLayer(p + 3.7, 55.0, 41.0, crowd, 1.8, air) * 0.8;
     stars += starLayer(p + 9.2, 110.0, 97.0, crowd, 0.6, air) * 0.55;
-    stars += formation(p + 5.5, 3.0, 13.0) * mix(0.8, 1.1, air * 0.5);
+    stars += formation(p + 5.5, 3.0, 13.0) * mix(0.8, 1.1, air * 0.5) * formations;
     // Stars low in the sky are dimmed by the haze.
-    col += stars * mix(0.45, 1.0, smoothstep(0.0, 0.45, height));
+    col += stars * starBrightness * mix(0.45, 1.0, smoothstep(0.0, 0.45, height));
 
     col += satellite(p, aspect);
     col += shootingStar(p, aspect, 53.0, 0.0);

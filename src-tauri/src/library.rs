@@ -15,7 +15,32 @@ const BUILTINS: &[(&str, &str)] = &[
     ("Paper Gradient", include_str!("../../shaders/Paper Gradient.glsl")),
 ];
 
+/// Starter shaders as earlier versions shipped them (FNV-1a 64 of the text with
+/// LF line endings). A library copy that still matches one was never edited, so
+/// it is safe to replace with the current version.
+const PREVIOUS_BUILTINS: &[(&str, u64)] = &[
+    // 0.1.0
+    ("Aurora", 0xc5095777df097397),
+    ("Fireflies", 0xd58f83560ae75b0c),
+    ("Lava Lamp", 0x437e5399a1d1c225),
+    ("Paper Gradient", 0x6a03787b876a1a01),
+    ("Slow Ripples", 0x79fb07590c4c8064),
+    ("Soft Hills", 0xacfaf5fce7c180c6),
+    ("Starfield", 0xa7ecbae89bbba255),
+    ("Terracotta Dusk", 0xce56f0ea5c822ee3),
+    ("Warm Plasma", 0x067f52915091d00f),
+];
+
 const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
+
+fn text_hash(text: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in text.replace("\r\n", "\n").bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
 
 fn allowed(c: char) -> bool {
     c.is_alphanumeric() || " -_()".contains(c)
@@ -63,11 +88,20 @@ pub fn write_builtins(overwrite: bool) -> Result<(), String> {
 }
 
 /// First run: create the library and fill it with the starter shaders.
+/// Later runs: bring unedited starter shaders up to date.
 pub fn ensure() -> Result<(), String> {
-    if shaders_dir().exists() {
-        return Ok(());
+    if !shaders_dir().exists() {
+        return write_builtins(false);
     }
-    write_builtins(false)
+    for (name, source) in BUILTINS {
+        let path = shader_path(name);
+        let Ok(current) = fs::read_to_string(&path) else { continue };
+        let hash = text_hash(&current);
+        if hash != text_hash(source) && PREVIOUS_BUILTINS.iter().any(|(n, h)| n == name && *h == hash) {
+            fs::write(&path, source).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 pub fn list() -> Result<Vec<String>, String> {
@@ -145,6 +179,16 @@ mod tests {
     fn cleans_imported_names() {
         assert_eq!(clean_name("my.cool/shader!!"), "my cool shader");
         assert_eq!(clean_name("***"), "Imported");
+    }
+
+    #[test]
+    fn text_hash_ignores_line_endings() {
+        assert_eq!(text_hash("a\r\nb\n"), text_hash("a\nb\n"));
+        assert_ne!(text_hash("a"), text_hash("b"));
+        // A current starter is never mistaken for an old one.
+        for (name, source) in BUILTINS {
+            assert!(!PREVIOUS_BUILTINS.iter().any(|(n, h)| n == name && *h == text_hash(source)));
+        }
     }
 
     #[test]

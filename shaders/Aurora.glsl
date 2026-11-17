@@ -1,5 +1,10 @@
 // Aurora — soft curtains of light swaying over a dark sky.
 
+float speed = 1.0;                       // @slider 0.0 4.0 Speed
+float brightness = 1.0;                  // @slider 0.2 2.5 Brightness
+vec3 lowColor = vec3(0.90, 0.52, 0.40);  // @color Lower curtain
+vec3 highColor = vec3(0.55, 0.75, 0.62); // @color Upper curtain
+
 float hash(float n) {
     return fract(sin(n) * 43758.5453);
 }
@@ -13,7 +18,7 @@ float noise(float x) {
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
-    float t = iTime * 0.08;
+    float t = iTime * 0.08 * speed;
 
     vec3 col = mix(vec3(0.13, 0.12, 0.13), vec3(0.07, 0.07, 0.09), uv.y);
 
@@ -26,8 +31,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         // Sharp lower edge, long fade upward
         float band = exp(-max(d, 0.0) * 6.0) * smoothstep(-0.05, 0.0, d);
         float rays = 0.7 + 0.3 * noise(uv.x * 40.0 + f * 5.0 + t * 3.0);
-        vec3 tint = mix(vec3(0.90, 0.52, 0.40), vec3(0.55, 0.75, 0.62), f / 2.0);
-        col += tint * band * rays * 0.35;
+        vec3 tint = mix(lowColor, highColor, f / 2.0);
+        col += tint * band * rays * 0.35 * brightness;
     }
 
     fragColor = vec4(col, 1.0);

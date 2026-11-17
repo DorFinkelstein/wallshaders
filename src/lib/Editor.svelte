@@ -13,7 +13,8 @@
   interface Props {
     /** Identifies the open document. Each one keeps its own cursor and undo history. */
     docId: number;
-    /** Text used the first time a document is shown. */
+    /** The document's text. Changes made outside the editor (such as by the
+     *  shader settings) are applied to it as ordinary, undoable edits. */
     source: string;
     errors: ShaderError[];
     onchange: (source: string) => void;
@@ -115,6 +116,23 @@
     shownId = id;
   }
 
+  /** Bring the shown document in line with `text`, replacing only what differs. */
+  function sync(text: string) {
+    if (!view) return;
+    const current = view.state.doc.toString();
+    if (current === text) return;
+    let start = 0;
+    const max = Math.min(current.length, text.length);
+    while (start < max && current.charCodeAt(start) === text.charCodeAt(start)) start++;
+    let endA = current.length;
+    let endB = text.length;
+    while (endA > start && endB > start && current.charCodeAt(endA - 1) === text.charCodeAt(endB - 1)) {
+      endA--;
+      endB--;
+    }
+    view.dispatch({ changes: { from: start, to: endA, insert: text.slice(start, endB) } });
+  }
+
   function applyErrors(list: ShaderError[]) {
     if (!view) return;
     const doc = view.state.doc;
@@ -135,6 +153,11 @@
   $effect(() => {
     show(docId);
     applyErrors(errors);
+  });
+
+  $effect(() => {
+    const text = source;
+    if (untrack(() => docId) === shownId) sync(text);
   });
 </script>
 

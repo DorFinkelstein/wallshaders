@@ -1,6 +1,7 @@
 //! Settings and file locations shared by the app and the wallpaper renderer.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -8,8 +9,11 @@ use std::path::PathBuf;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Config {
-    /// Name (file stem) of the shader shown as wallpaper.
+    /// Name (file stem) of the shader shown on every screen without its own choice.
     pub active_shader: Option<String>,
+    /// Per-screen choices, keyed by monitor id (see `monitors`). An empty name
+    /// means "no shader here": that screen keeps the normal Windows wallpaper.
+    pub screens: BTreeMap<String, String>,
     /// Frame rate cap.
     pub fps: u32,
     /// Fraction of the monitor resolution the shader is drawn at (0.25–1.0).
@@ -22,18 +26,22 @@ pub struct Config {
     pub battery_mode: String,
     /// Feed the cursor position to shaders through `iMouse`.
     pub mouse_input: bool,
+    /// Look for a new version of the app when it starts (the app's setting; the renderer ignores it).
+    pub check_updates: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             active_shader: None,
+            screens: BTreeMap::new(),
             fps: 30,
             render_scale: 0.75,
             pause_fullscreen: true,
             pause_maximized: true,
             battery_mode: "half".into(),
             mouse_input: false,
+            check_updates: true,
         }
     }
 }
@@ -49,6 +57,52 @@ impl Config {
             self.battery_mode = "half".into();
         }
         self
+    }
+
+    /// The shader a screen shows, or `None` for the normal Windows wallpaper.
+    pub fn shader_for(&self, screen: &str) -> Option<&str> {
+        match self.screens.get(screen) {
+            Some(name) => (!name.is_empty()).then_some(name.as_str()),
+            None => self.active_shader.as_deref(),
+        }
+    }
+
+    /// Is any screen set to show a shader?
+    pub fn has_any_shader(&self) -> bool {
+        self.active_shader.is_some() || self.screens.values().any(|s| !s.is_empty())
+    }
+
+    /// Is this shader on any screen?
+    pub fn uses_shader(&self, name: &str) -> bool {
+        self.active_shader.as_deref() == Some(name) || self.screens.values().any(|s| s == name)
+    }
+
+    /// Follow a renamed shader. Returns true if anything changed.
+    pub fn rename_shader(&mut self, from: &str, to: &str) -> bool {
+        let mut changed = false;
+        if self.active_shader.as_deref() == Some(from) {
+            self.active_shader = Some(to.to_string());
+            changed = true;
+        }
+        for v in self.screens.values_mut() {
+            if v == from {
+                *v = to.to_string();
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Take a deleted shader off every screen. Returns true if anything changed.
+    pub fn forget_shader(&mut self, name: &str) -> bool {
+        let mut changed = false;
+        if self.active_shader.as_deref() == Some(name) {
+            self.active_shader = None;
+            changed = true;
+        }
+        let before = self.screens.len();
+        self.screens.retain(|_, v| v != name);
+        changed || self.screens.len() != before
     }
 
     pub fn load() -> Self {
@@ -123,6 +177,26 @@ mod tests {
         assert_eq!(c.fps, 60);
         assert_eq!(c.render_scale, 0.75);
         assert!(c.pause_fullscreen);
+    }
+
+    #[test]
+    fn screens_override_the_shared_shader() {
+        let mut c = Config { active_shader: Some("A".into()), ..Config::default() };
+        c.screens.insert("left".into(), "B".into());
+        c.screens.insert("right".into(), String::new());
+        assert_eq!(c.shader_for("left"), Some("B"));
+        assert_eq!(c.shader_for("right"), None);
+        assert_eq!(c.shader_for("middle"), Some("A"));
+        assert!(c.rename_shader("B", "C"));
+        assert_eq!(c.shader_for("left"), Some("C"));
+        assert!(c.forget_shader("A"));
+        assert_eq!(c.shader_for("middle"), None);
+        assert!(c.has_any_shader());
+        assert!(c.forget_shader("C"));
+        assert!(!c.has_any_shader());
+        // Old config files without "screens" still load.
+        let old: Config = serde_json::from_str(r#"{"active_shader": "A"}"#).unwrap();
+        assert!(old.screens.is_empty());
     }
 
     #[test]

@@ -5,8 +5,8 @@
     shaders: string[];
     /** Shader shown in the editor and preview. */
     current: string | null;
-    /** Shader currently on the desktop. */
-    wallpaper: string | null;
+    /** Shaders currently on the desktop (on any screen). */
+    wallpaper: string[];
     onopen: (name: string) => void;
     onnew: () => void;
     onimport: () => void;
@@ -71,7 +71,7 @@
         {:else}
           <button class="open" onclick={() => onopen(name)} title="Open {name}">
             <span class="name">{name}</span>
-            {#if name === wallpaper}
+            {#if wallpaper.includes(name)}
               <span class="badge" title="This shader is your wallpaper"><Icon name="monitor" size={12} />On desktop</span>
             {/if}
           </button>
