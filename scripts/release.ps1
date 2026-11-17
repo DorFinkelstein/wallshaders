@@ -57,9 +57,11 @@ Write-Host "Wrote $latestPath"
 
 if ($Publish) {
   $files = @((Join-Path $dir $installer), $latestPath)
-  $notesArg = if ($Notes) { $Notes } else { "$name $version" }
+  # Notes go through a file: multi-line text does not survive Windows PowerShell's argument passing.
+  $notesFile = Join-Path $env:TEMP "wallshaders-release-notes.md"
+  [IO.File]::WriteAllText($notesFile, $(if ($Notes) { $Notes } else { "$name $version" }))
   $ErrorActionPreference = "Continue"
-  gh release create "v$version" @files --repo $Repo --title "$name $version" --notes $notesArg
+  gh release create "v$version" @files --repo $Repo --title "$name $version" --notes-file $notesFile
   $ErrorActionPreference = "Stop"
   if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
   Write-Host "Published v$version"
