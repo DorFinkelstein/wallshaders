@@ -8,7 +8,7 @@
 
 use crate::config::{self, log, Config};
 use crate::control::{self, CONTROL_CLASS, WM_WS_RELOAD};
-use crate::glctx::{self, Frame, GlContext, Pipeline};
+use crate::glctx::{Frame, GlContext, Pipeline};
 use crate::monitors::{self, Monitor};
 use crate::shader;
 use crate::win::{class_name, wide};
@@ -29,7 +29,6 @@ use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const WALL_CLASS: &str = "WallshadersWallpaper";
-const ANCHOR_CLASS: &str = "WallshadersGl";
 const WM_WS_TRAY: u32 = WM_APP + 2;
 const MENU_OPEN: usize = 1;
 const MENU_PAUSE: usize = 2;
@@ -242,9 +241,9 @@ unsafe fn find_host() -> Option<Host> {
     None
 }
 
-// ------------------------------------------------------- screens and views
+// ------------------------------------------------------------ screens
 
-/// One shader drawn at one size. Screens with the same shader and size share it.
+/// The shader one screen draws, compiled in that screen's own OpenGL context.
 struct View {
     shader: String,
     pipe: Pipeline,
@@ -256,70 +255,87 @@ struct View {
     dirty: u32,
 }
 
-/// One screen's window behind the desktop icons.
+/// One screen's window behind the desktop icons. Each window has its own
+/// OpenGL context, created on that window: drawing into a window from a context
+/// made for another one shows nothing on some drivers (seen with NVIDIA and the
+/// layered windows that Windows 11 24H2 needs).
 struct Screen {
     id: String,
     rect: (i32, i32, i32, i32), // x, y, width, height (virtual-screen pixels)
     hmon: isize,
     hwnd: HWND,
-    hdc: HDC,
-    view: usize,
+    ctx: Option<GlContext>,
+    view: Option<View>,
     covered: bool,
 }
 
+impl Screen {
+    unsafe fn destroy(&mut self) {
+        if let (Some(ctx), Some(mut view)) = (self.ctx.as_ref(), self.view.take()) {
+            ctx.make_own_current();
+            view.pipe.destroy(&ctx.gl);
+        }
+        self.ctx.take();
+        if IsWindow(self.hwnd) != 0 {
+            DestroyWindow(self.hwnd);
+        }
+    }
+
+    /// Compile `name` for this screen at the current render scale.
+    unsafe fn load(&mut self, name: &str, scale: f32) {
+        let ctx = self.ctx.as_ref().unwrap();
+        ctx.make_own_current();
+        if let Some(mut old) = self.view.take() {
+            old.pipe.destroy(&ctx.gl);
+        }
+        let w = ((self.rect.2 as f32 * scale).round() as i32).max(1);
+        let h = ((self.rect.3 as f32 * scale).round() as i32).max(1);
+        let mut pipe = match Pipeline::new(&ctx.gl) {
+            Ok(p) => p,
+            Err(e) => {
+                log(&format!("could not create a render target: {e}"));
+                return;
+            }
+        };
+        pipe.resize(&ctx.gl, w, h);
+        let mut view = View { shader: name.to_string(), pipe, ok: false, animated: false, wants_mouse: false, mouse: [0.0; 4], dirty: 3 };
+        match std::fs::read_to_string(config::shader_path(name)) {
+            Ok(src) => match view.pipe.compile(&ctx.gl, &src) {
+                Ok(()) => {
+                    view.ok = true;
+                    view.animated = shader::is_animated(&src);
+                    view.wants_mouse = shader::uses_mouse(&src);
+                }
+                Err(e) => log(&format!("shader {name:?} failed to compile:\n{e}")),
+            },
+            Err(e) => log(&format!("cannot read shader {name:?}: {e}")),
+        }
+        log(&format!("screen {:?}: {name:?} at {w}x{h} (animated: {})", self.rect, view.animated));
+        self.view = Some(view);
+    }
+}
+
 struct Surface {
-    anchor: HWND,
-    ctx: Option<GlContext>,
     host: Host,
     layered: bool,
     screens: Vec<Screen>,
-    views: Vec<View>,
-}
-
-unsafe fn create_hidden(hinst: HINSTANCE, class: &str) -> HWND {
-    let class = wide(class);
-    CreateWindowExW(
-        WS_EX_TOOLWINDOW,
-        class.as_ptr(),
-        class.as_ptr(),
-        WS_POPUP,
-        0,
-        0,
-        16,
-        16,
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        hinst,
-        std::ptr::null(),
-    )
 }
 
 impl Surface {
-    unsafe fn create(hinst: HINSTANCE) -> Result<Self, String> {
+    unsafe fn create() -> Result<Self, String> {
         let host = find_host().ok_or("The desktop window was not found")?;
         let layered = host.raised.is_some() && std::env::var_os("WALLSHADERS_NO_LAYERED").is_none();
-        // The OpenGL context lives on a small hidden window and draws into each
-        // screen's window in turn, so screens can come and go freely.
-        let anchor = create_hidden(hinst, ANCHOR_CLASS);
-        if anchor.is_null() {
-            return Err("Could not create the OpenGL window".into());
-        }
-        let ctx = match GlContext::create(anchor) {
-            Ok(c) => c,
-            Err(e) => {
-                DestroyWindow(anchor);
-                return Err(e);
-            }
-        };
         log(&format!("attached to desktop (raised layout: {}, layered: {layered})", host.raised.is_some()));
-        Ok(Surface { anchor, ctx: Some(ctx), host, layered, screens: Vec::new(), views: Vec::new() })
+        Ok(Surface { host, layered, screens: Vec::new() })
     }
 
     fn host_alive(&self) -> bool {
         unsafe { IsWindow(self.host.parent) != 0 && self.screens.iter().all(|s| IsWindow(s.hwnd) != 0) }
     }
 
-    unsafe fn create_window(&self, hinst: HINSTANCE, m: &Monitor) -> Result<(HWND, HDC), String> {
+    /// A window for one screen, with its own OpenGL context, set up the same
+    /// way as in 0.1.0: context first, then moved behind the icons.
+    unsafe fn create_screen(&self, hinst: HINSTANCE, m: &Monitor, origin: (i32, i32)) -> Result<Screen, String> {
         let class = wide(WALL_CLASS);
         let hwnd = CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | if self.layered { WS_EX_LAYERED } else { 0 },
@@ -328,8 +344,12 @@ impl Surface {
             WS_POPUP,
             0,
             0,
-            m.width.max(1),
-            m.height.max(1),
+            // Created small and sized after SetParent, like 0.1.0. A layered
+            // window created at full size before its OpenGL context is made
+            // stays black on screen (seen on NVIDIA, Windows 11 24H2), even
+            // though drawing into it succeeds.
+            16,
+            16,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             hinst,
@@ -341,31 +361,25 @@ impl Surface {
         if self.layered {
             SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
         }
-        match self.ctx.as_ref().unwrap().attach(hwnd) {
-            Ok(hdc) => {
-                SetParent(hwnd, self.host.parent);
-                Ok((hwnd, hdc))
-            }
+        let ctx = match GlContext::create(hwnd) {
+            Ok(c) => c,
             Err(e) => {
                 DestroyWindow(hwnd);
-                Err(e)
+                return Err(e);
             }
-        }
-    }
-
-    unsafe fn destroy_screen(&self, s: &Screen) {
-        if IsWindow(s.hwnd) != 0 {
-            ReleaseDC(s.hwnd, s.hdc);
-            DestroyWindow(s.hwnd);
-        }
-    }
-
-    unsafe fn drop_views(&mut self) {
-        let ctx = self.ctx.as_ref().unwrap();
-        ctx.make_own_current();
-        for mut v in self.views.drain(..) {
-            v.pipe.destroy(&ctx.gl);
-        }
+        };
+        SetParent(hwnd, self.host.parent);
+        // Child windows are placed relative to the desktop host, which covers the whole virtual screen.
+        SetWindowPos(hwnd, std::ptr::null_mut(), m.x - origin.0, m.y - origin.1, m.width, m.height, SWP_NOZORDER | SWP_NOACTIVATE);
+        Ok(Screen {
+            id: m.id.clone(),
+            rect: (m.x, m.y, m.width, m.height),
+            hmon: m.handle,
+            hwnd,
+            ctx: Some(ctx),
+            view: None,
+            covered: false,
+        })
     }
 
     /// Match the windows to the current screens and settings, and (re)compile
@@ -373,83 +387,40 @@ impl Surface {
     unsafe fn rebuild(&mut self, hinst: HINSTANCE, cfg: &Config) {
         let monitors = monitors::list();
         let origin = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
+        let wanted: Vec<(&Monitor, &str)> = monitors.iter().filter_map(|m| cfg.shader_for(&m.id).map(|s| (m, s))).collect();
 
-        // Views: one per (shader, size).
-        self.drop_views();
-        let ctx = self.ctx.as_ref().unwrap();
-        ctx.make_own_current();
-        let mut wanted: Vec<(&Monitor, usize)> = Vec::new();
-        for m in &monitors {
-            let Some(name) = cfg.shader_for(&m.id) else { continue };
-            let w = ((m.width as f32 * cfg.render_scale).round() as i32).max(1);
-            let h = ((m.height as f32 * cfg.render_scale).round() as i32).max(1);
-            let index = match self.views.iter().position(|v| v.shader == name && v.pipe.size() == (w, h)) {
-                Some(i) => i,
-                None => {
-                    let mut pipe = match Pipeline::new(&ctx.gl) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            log(&format!("could not create a render target: {e}"));
-                            continue;
-                        }
-                    };
-                    pipe.resize(&ctx.gl, w, h);
-                    let mut view = View { shader: name.to_string(), pipe, ok: false, animated: false, wants_mouse: false, mouse: [0.0; 4], dirty: 3 };
-                    match std::fs::read_to_string(config::shader_path(name)) {
-                        Ok(src) => match view.pipe.compile(&ctx.gl, &src) {
-                            Ok(()) => {
-                                view.ok = true;
-                                view.animated = shader::is_animated(&src);
-                                view.wants_mouse = shader::uses_mouse(&src);
-                            }
-                            Err(e) => log(&format!("shader {name:?} failed to compile:\n{e}")),
-                        },
-                        Err(e) => log(&format!("cannot read shader {name:?}: {e}")),
-                    }
-                    log(&format!("view {name:?} at {w}x{h} (animated: {})", view.animated));
-                    self.views.push(view);
-                    self.views.len() - 1
-                }
-            };
-            wanted.push((m, index));
-        }
-
-        // Windows: keep the ones whose screen is unchanged, drop the rest.
-        let old = std::mem::take(&mut self.screens);
+        // Keep the windows whose screen is unchanged, drop the rest.
         let mut keep: Vec<Screen> = Vec::new();
-        for s in old {
+        for mut s in std::mem::take(&mut self.screens) {
             let still = wanted.iter().any(|(m, _)| m.id == s.id && (m.x, m.y, m.width, m.height) == s.rect);
             if still && IsWindow(s.hwnd) != 0 {
                 keep.push(s);
             } else {
-                self.destroy_screen(&s);
+                s.destroy();
             }
         }
-        let mut changed = false;
-        for (m, view) in wanted {
-            let rect = (m.x, m.y, m.width, m.height);
-            if let Some(pos) = keep.iter().position(|s| s.id == m.id) {
-                let mut s = keep.swap_remove(pos);
-                s.view = view;
-                s.hmon = m.handle;
-                self.screens.push(s);
-                continue;
-            }
-            match self.create_window(hinst, m) {
-                Ok((hwnd, hdc)) => {
-                    // Child windows are placed relative to the desktop host, which
-                    // covers the whole virtual screen.
-                    SetWindowPos(hwnd, std::ptr::null_mut(), m.x - origin.0, m.y - origin.1, m.width, m.height, SWP_NOZORDER | SWP_NOACTIVATE);
-                    self.screens.push(Screen { id: m.id.clone(), rect, hmon: m.handle, hwnd, hdc, view, covered: false });
-                    changed = true;
-                }
-                Err(e) => log(&format!("screen {}: {e}", m.name)),
-            }
+        let mut created = false;
+        for (m, name) in wanted {
+            let mut screen = match keep.iter().position(|s| s.id == m.id) {
+                Some(pos) => keep.swap_remove(pos),
+                None => match self.create_screen(hinst, m, origin) {
+                    Ok(s) => {
+                        created = true;
+                        s
+                    }
+                    Err(e) => {
+                        log(&format!("screen {}: {e}", m.name));
+                        continue;
+                    }
+                },
+            };
+            screen.hmon = m.handle;
+            screen.load(name, cfg.render_scale);
+            self.screens.push(screen);
         }
-        if changed {
+        if created {
             self.order_windows();
         }
-        ctx.make_own_current();
     }
 
     /// Put every screen window right behind the desktop icons.
@@ -477,15 +448,8 @@ impl Surface {
 impl Drop for Surface {
     fn drop(&mut self) {
         unsafe {
-            if self.ctx.is_some() {
-                self.drop_views();
-            }
-            for s in std::mem::take(&mut self.screens) {
-                self.destroy_screen(&s);
-            }
-            self.ctx.take();
-            if IsWindow(self.anchor) != 0 {
-                DestroyWindow(self.anchor);
+            for mut s in std::mem::take(&mut self.screens) {
+                s.destroy();
             }
         }
     }
@@ -494,7 +458,7 @@ impl Drop for Surface {
 // ----------------------------------------------------------- pause rules
 
 fn is_shell_class(class: &str) -> bool {
-    matches!(class, "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | WALL_CLASS | ANCHOR_CLASS | CONTROL_CLASS)
+    matches!(class, "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | WALL_CLASS | CONTROL_CLASS)
 }
 
 unsafe fn monitor_rect(mon: HMONITOR) -> Option<RECT> {
@@ -605,7 +569,6 @@ unsafe fn run_inner(debug: bool) -> i32 {
     let hinst = GetModuleHandleW(std::ptr::null());
     register_class(hinst, CONTROL_CLASS, Some(ctrl_proc));
     register_class(hinst, WALL_CLASS, Some(wall_proc));
-    register_class(hinst, ANCHOR_CLASS, Some(DefWindowProcW));
     let ctrl_class = wide(CONTROL_CLASS);
     let ctrl = CreateWindowExW(
         WS_EX_TOOLWINDOW,
@@ -669,7 +632,7 @@ unsafe fn run_inner(debug: bool) -> i32 {
         let alive = surface.as_ref().map(|s| s.host_alive()).unwrap_or(false);
         if !alive || REATTACH.swap(false, Relaxed) {
             surface = None;
-            match Surface::create(hinst) {
+            match Surface::create() {
                 Ok(s) => {
                     surface = Some(s);
                     need_load = true;
@@ -700,12 +663,12 @@ unsafe fn run_inner(debug: bool) -> i32 {
             last_rules = None;
             trim_at = Some(Instant::now() + Duration::from_secs(3));
             if debug {
-                let list: Vec<String> = s.screens.iter().map(|x| format!("{:?} -> {}", x.rect, s.views[x.view].shader)).collect();
+                let list: Vec<String> = s.screens.iter().map(|x| format!("{:?} -> {}", x.rect, x.view.as_ref().map(|v| v.shader.as_str()).unwrap_or("-"))).collect();
                 log(&format!("screens: {}", list.join(", ")));
             }
         }
         if REDRAW.swap(false, Relaxed) {
-            for v in &mut s.views {
+            for v in s.screens.iter_mut().filter_map(|x| x.view.as_mut()) {
                 v.dirty = v.dirty.max(1);
             }
         }
@@ -719,23 +682,21 @@ unsafe fn run_inner(debug: bool) -> i32 {
                 let now_covered = cfg.pause_maximized && covered.contains(&screen.hmon);
                 if screen.covered && !now_covered {
                     // Coming back into view: make sure it shows a fresh picture.
-                    s.views[screen.view].dirty = s.views[screen.view].dirty.max(1);
+                    if let Some(v) = screen.view.as_mut() {
+                        v.dirty = v.dirty.max(1);
+                    }
                 }
                 screen.covered = now_covered;
             }
         }
         let paused = global_pause || LOCKED.load(Relaxed) || DISPLAY_OFF.load(Relaxed) || USER_PAUSED.load(Relaxed);
 
-        // Which views have something to draw this frame?
-        let mut work = vec![false; s.views.len()];
-        if !paused {
-            for screen in &s.screens {
-                let v = &s.views[screen.view];
-                if !screen.covered && (v.animated || v.dirty > 0) {
-                    work[screen.view] = true;
-                }
-            }
-        }
+        // Which screens have something to draw this frame?
+        let work: Vec<bool> = s
+            .screens
+            .iter()
+            .map(|x| !paused && !x.covered && x.view.as_ref().map(|v| v.animated || v.dirty > 0).unwrap_or(false))
+            .collect();
         if !work.iter().any(|&w| w) {
             if !was_idle {
                 was_idle = true;
@@ -774,37 +735,29 @@ unsafe fn run_inner(debug: bool) -> i32 {
         let date = local_date();
         let mut cursor = POINT { x: 0, y: 0 };
         let cursor_ok = cfg.mouse_input && GetCursorPos(&mut cursor) != 0;
-        let ctx = s.ctx.as_ref().unwrap();
-        let gl = &ctx.gl;
-        let mut drawn = vec![false; s.views.len()];
-        for screen in &s.screens {
-            let vi = screen.view;
-            if !work[vi] || screen.covered {
+        for (screen, &todo) in s.screens.iter_mut().zip(&work) {
+            if !todo {
                 continue;
             }
-            if !ctx.make_current(screen.hdc) {
-                continue;
-            }
-            let view = &mut s.views[vi];
-            if !drawn[vi] {
-                drawn[vi] = true;
-                if view.wants_mouse && cursor_ok {
-                    let (x, y, w, h) = screen.rect;
-                    if cursor.x >= x && cursor.x < x + w && cursor.y >= y && cursor.y < y + h {
-                        let (fw, fh) = view.pipe.size();
-                        view.mouse = [(cursor.x - x) as f32 * fw as f32 / w as f32, (y + h - cursor.y) as f32 * fh as f32 / h as f32, 0.0, 0.0];
-                    }
+            let (Some(ctx), Some(view)) = (screen.ctx.as_ref(), screen.view.as_mut()) else { continue };
+            if !ctx.make_own_current() {
+                if debug && frame_index % 150 == 0 {
+                    log(&format!("cannot draw on screen {:?}: wglMakeCurrent failed ({})", screen.rect, GetLastError()));
                 }
-                let frame = Frame { time: shader_time as f32, delta: delta as f32, rate: fps as f32, index: frame_index, mouse: view.mouse, date };
-                view.pipe.render(gl, &frame);
+                continue;
             }
-            view.pipe.present(gl, screen.rect.2, screen.rect.3);
-            glctx::swap(screen.hdc);
-        }
-        for (v, d) in s.views.iter_mut().zip(&drawn) {
-            if *d {
-                v.dirty = v.dirty.saturating_sub(1);
+            if view.wants_mouse && cursor_ok {
+                let (x, y, w, h) = screen.rect;
+                if cursor.x >= x && cursor.x < x + w && cursor.y >= y && cursor.y < y + h {
+                    let (fw, fh) = view.pipe.size();
+                    view.mouse = [(cursor.x - x) as f32 * fw as f32 / w as f32, (y + h - cursor.y) as f32 * fh as f32 / h as f32, 0.0, 0.0];
+                }
             }
+            let frame = Frame { time: shader_time as f32, delta: delta as f32, rate: fps as f32, index: frame_index, mouse: view.mouse, date };
+            view.pipe.render(&ctx.gl, &frame);
+            view.pipe.present(&ctx.gl, screen.rect.2, screen.rect.3);
+            ctx.swap();
+            view.dirty = view.dirty.saturating_sub(1);
         }
         frame_index = frame_index.wrapping_add(1);
 
@@ -812,7 +765,12 @@ unsafe fn run_inner(debug: bool) -> i32 {
             stat_frames += 1;
             if stat_since.elapsed() >= Duration::from_secs(5) {
                 let secs = stat_since.elapsed().as_secs_f32();
-                let views: Vec<String> = s.views.iter().map(|v| format!("{} {:?} ok={}", v.shader, v.pipe.size(), v.ok)).collect();
+                let views: Vec<String> = s
+                    .screens
+                    .iter()
+                    .filter_map(|x| x.view.as_ref())
+                    .map(|v| format!("{} {:?} ok={}", v.shader, v.pipe.size(), v.ok))
+                    .collect();
                 log(&format!(
                     "{:.1} fps, target {fps}, screens {} (covered {}), views [{}]",
                     stat_frames as f32 / secs,

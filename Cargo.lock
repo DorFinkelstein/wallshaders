@@ -4651,7 +4651,7 @@ dependencies = [
 
 [[package]]
 name = "wallshaders"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4666,7 +4666,7 @@ dependencies = [
 
 [[package]]
 name = "wallshaders-renderer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "glow",
  "png 0.17.16",

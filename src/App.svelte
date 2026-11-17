@@ -416,10 +416,20 @@
   <nav class="toolbar" aria-label="Main">
     <div class="logo" title="Wallshaders">
       <svg viewBox="0 0 32 32" width="30" height="30" aria-hidden="true">
-        <rect width="32" height="32" rx="9" fill="var(--accent)" />
-        <circle cx="20.5" cy="11.5" r="4.5" fill="#fff0de" />
-        <path d="M0 18c6-3 11-2 17 1s10 3 15 1v3a9 9 0 0 1-9 9H9a9 9 0 0 1-9-9z" fill="#8f5546" />
-        <path d="M0 24c5-3 10-3 16-1s11 2 16 0v0a9 9 0 0 1-9 9H9a9 9 0 0 1-9-9z" fill="#33302f" />
+        <!-- Same design as assets/icon.glsl: charcoal tile, three ribbons, a spark. -->
+        <defs>
+          <linearGradient id="logo-tile" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#332e2b" />
+            <stop offset="1" stop-color="#211f1e" />
+          </linearGradient>
+        </defs>
+        <rect x="0.5" y="0.5" width="31" height="31" rx="7" fill="url(#logo-tile)" stroke="rgba(255, 240, 225, 0.12)" />
+        <g fill="none" stroke-width="3.2" stroke-linecap="butt">
+          <path d="M4.5 13.6C9 13.8 12 11 16 9.6S24 8.2 27.5 9.6" stroke="#f7c7a3" />
+          <path d="M4.5 18.6C9 16.6 12 14.2 16 14.6S24 17.4 27.5 18.2" stroke="#d98f73" />
+          <path d="M4.5 22.6C9 20.2 12 19.2 16 20.2S24 23.6 27.5 24.6" stroke="#9e5c4c" />
+        </g>
+        <path d="M10 5.2l.9 1.9 1.9.9-1.9.9-.9 1.9-.9-1.9-1.9-.9 1.9-.9z" fill="#fff2dc" />
       </svg>
     </div>
     <button class:on={drawer === "library"} onclick={() => toggleDrawer("library")} title="Library">

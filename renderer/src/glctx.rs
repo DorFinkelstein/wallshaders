@@ -12,8 +12,6 @@ pub struct GlContext {
     hwnd: HWND,
     hdc: HDC,
     hglrc: HGLRC,
-    format: i32,
-    pfd: PIXELFORMATDESCRIPTOR,
     pub gl: glow::Context,
 }
 
@@ -92,38 +90,21 @@ impl GlContext {
                 None => std::ptr::null(),
             }
         });
-        Ok(GlContext { hwnd, hdc, hglrc, format, pfd, gl })
+        Ok(GlContext { hwnd, hdc, hglrc, gl })
     }
 
-    /// Prepare another window to be drawn with this context: it gets the same
-    /// pixel format. Returns the window's device context (kept for its lifetime,
-    /// since window classes used here are `CS_OWNDC`).
-    pub unsafe fn attach(&self, hwnd: HWND) -> Result<HDC, String> {
-        let hdc = GetDC(hwnd);
-        if hdc.is_null() {
-            return Err("GetDC failed".into());
-        }
-        if SetPixelFormat(hdc, self.format, &self.pfd) == 0 {
-            ReleaseDC(hwnd, hdc);
-            return Err("Could not give the window an OpenGL pixel format".into());
-        }
-        Ok(hdc)
-    }
-
-    /// Draw into `hdc` (from `attach`) from now on.
-    pub unsafe fn make_current(&self, hdc: HDC) -> bool {
-        wglMakeCurrent(hdc, self.hglrc) != 0
-    }
-
-    /// Draw into the context's own (hidden) window again.
+    /// Draw with this context (into its own window) from now on. Needed when
+    /// a process has several contexts, one per screen.
     pub unsafe fn make_own_current(&self) -> bool {
         wglMakeCurrent(self.hdc, self.hglrc) != 0
     }
-}
 
-/// Show what was drawn into a window's back buffer.
-pub unsafe fn swap(hdc: HDC) {
-    SwapBuffers(hdc);
+    /// Show what was drawn into the window's back buffer.
+    pub fn swap(&self) {
+        unsafe {
+            SwapBuffers(self.hdc);
+        }
+    }
 }
 
 impl Drop for GlContext {
